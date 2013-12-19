@@ -62,7 +62,16 @@ echo "Default SSH Port is 22. We suggest you change it."
 echo "Question 1: Which port would you like to run your SSH client [1024-65000]?"
 read SSH_PORT
 sed -i "s/__PORT__/$SSH_PORT/g" $SSH_CONFIG_FILE
-echo "We suggest you disable password authentication in SSH"
+
+echo "We disable remote root login with password by default"
+sed -i "s/__PERMIT_ROOT__/without-password/g" $SSH_CONFIG_FILE
+
+echo "We suggest you disable password authentication for other users as well."
+echo "When you disable password, you will need key file to login"
+echo "Question 2: Should we disable password authentication (yes / no)?"
+read PASS_DISABLE
+sed -i "s/__PASS_AUTH__/$PASS_DISABLE/g" $SSH_CONFIG_FILE
+
 exit
 
 # check if root, if not get out
