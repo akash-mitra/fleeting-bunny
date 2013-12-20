@@ -72,6 +72,11 @@ echo "Question 2: Should we disable password authentication (yes / no)?"
 read PASS_DISABLE
 sed -i "s/__PASS_AUTH__/$PASS_DISABLE/g" $SSH_CONFIG_FILE
 
+echo "We update following parameters of your SSH session with the below corresponding values"
+echo "LoginGraceTime = 60 seconds (server disconnects if user has not logged-in successfully by this time)"
+echo "MaxAuthTries   = 4 (maximum number of authentication attempts permitted per connection)"
+echo "X11Forwarding  = yes (Specifies whether X11 forwarding is permitted)"
+
 exit
 
 # check if root, if not get out
