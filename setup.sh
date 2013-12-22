@@ -16,7 +16,7 @@
 #---------------------------------------------------------
 
 # user defined function for logging
-log () { echo "$1"; }
+log () { echo "`hostname` | `date '+%F | %H:%M:%S |'` $1"; }
 
 # Set Default Parameter Values
 VERSION="0.01"
@@ -27,6 +27,7 @@ HAS_CMS=1
 CMS_TYPE=1
 INSTALL_FOLDER="/home/setup/"
 LOG_FILE="./setup.log"
+FLEET_BUNN_CONFIG="./input.ini"
 
 # run the wizard first to get all the configuration information from user
 # show a prompt
@@ -56,8 +57,8 @@ fi
 
 # Log current system state
 log "uptime: `uptime`"
-log "System Details: `uname -o -s -v`"
-log "IP address is : `ifconfig eth0 | grep inet | awk '{ print $2 }'`"
+log "System Details: `uname -a`"
+log "IP address is : `ifconfig eth0 | grep "inet " | cut -d':' -f2 | cut -d' ' -f1`"
 
 # update and upgrade the server
 log "Performing yum update"
@@ -72,13 +73,16 @@ log "Upgrade Successful"
 fi
 
 # create a new staging folder to store prestine copy of products
-## mkdir $INSTALL_FOLDER
+log "Creating setup directory"
+if [ -d $INSTALL_FOLDER ]; then
+	log "WARNING: Fleeting Bunny Install directory already exists"
+else
+	 mkdir $INSTALL_FOLDER
+fi
 
 if [ $? -ne 0 ]; then
   echo "Failed to create setup directory under /"
   exit -1
-else
-log "Created setup directory"
 fi
 
 # copy a list of softwares to setup directory
@@ -86,17 +90,19 @@ fi
 
 
 # download templates for different server config files
+rm -f sshd_template.sh
 log "Downloading SSH template..."
-wget https://raw.github.com/akash-mitra/fleeting-bunny/master/sshd_template.sh 1> /dev/null
+wget --quiet --tries=3 https://raw.github.com/akash-mitra/fleeting-bunny/master/sshd_template.sh 2>&1 1> /dev/null
 SSH_CONFIG_FILE="./sshd_template.sh"
 
 #--------------------------------------------------------
 # securing the SSH server
 #--------------------------------------------------------
-log "Strengthening the security of the server..."
+log "Strengthening the security of the SSH server..."
 # SSH
 # backup the current ssh config file
 cp /etc/ssh/sshd_config $INSTALL_FOLDER
+log "Backed up sshd_config under $INSTALL_FOLDER"
 
 # Values for following variables need to be setup
 # Port __PORT__
@@ -115,32 +121,35 @@ read SSH_PORT
 sed -i "s/__PORT__/$SSH_PORT/g" $SSH_CONFIG_FILE
 log "SSH Port to be set to [$SSH_PORT]"
 
-echo "We disable remote root login with password by default"
-sed -i "s/__PERMIT_ROOT__/without-password/g" $SSH_CONFIG_FILE
-log "Password login to be disabled for root"
-
 echo "We suggest you disable password authentication for other users as well."
 echo "When you disable password, you will need key file to login"
-echo "Question 2: Should we disable password authentication (yes / no)?"
+echo "Question 2: Should we keep password authentication (yes / no)?"
 read PASS_DISABLE
 sed -i "s/__PASS_AUTH__/$PASS_DISABLE/g" $SSH_CONFIG_FILE
 log "Password based login to be disabled to other users as well"
 
-echo "We update following parameters of your SSH session with the below corresponding values"
-echo "LoginGraceTime = 60 seconds (server disconnects if user is not logged-in by this time)"
-echo "MaxAuthTries = 4 (maximum number of authentication attempts permitted per connection)"
-echo "X11Forwarding = yes (Specifies whether X11 forwarding is permitted)"
-echo "ClientAliveInterval = 120 seconds (This will give you 6 minutes of inactivity time)"
+log "LoginGraceTime to be set to 60 seconds. (server disconnects if user is not logged-in by this time)"
 sed -i "s/__GRACE_TIME__/60/g" $SSH_CONFIG_FILE
+
+log "Root login to be permitted to the server"
+sed -i "s/__PERMIT_ROOT__/yes/g" $SSH_CONFIG_FILE
+
+log "MaxAuthTries to be set to 4 (maximum number of authentication attempts permitted per connection)"
 sed -i "s/__MAX_AUTH_TRY__/4/g" $SSH_CONFIG_FILE
+
+log "Max session count to be set to 6" 
+sed -i "s/__MAX_SESSION_COUNT__/6/g" $SSH_CONFIG_FILE
+
+log "X11Forwarding is to be set to 'yes' (Specifies whether X11 forwarding is permitted)"
 sed -i "s/__X11_FORWARD__/yes/g" $SSH_CONFIG_FILE
+
+log "ClientAliveInterval to be set to 120 sec. (This will give you 6 minutes of inactivity time)"
 sed -i "s/__CLIENT_ALIVE__/120/g" $SSH_CONFIG_FILE
-log "Login Gracetime to be set to 60 seconds"
+
 BANNER_TEXT="This is a restricted system. Only explicitely authorized personnel are allowed to login"
-echo "SSH Banner will be updated with below text"
-echo $BANNER_TEXT
-cat $BANNER_TEXT > /etc/ssh/banner.text
-sed -i "s/__BANNER__/'/etc/ssh/banner.text'/g" $SSH_CONFIG_FILE
+echo $BANNER_TEXT > /etc/ssh/banner.text
+log "Banner text is to be set"
+sed -i "s~__BANNER__~/etc/ssh/banner.text~g" $SSH_CONFIG_FILE
 
 log "Replacing original SSHD_Config with the newly prepared one..."
 cp $SSH_CONFIG_FILE /etc/ssh/sshd_config
@@ -148,26 +157,251 @@ cp $SSH_CONFIG_FILE /etc/ssh/sshd_config
 # restart SSH
 log "Attempting to restart SSH server..."
 service sshd restart
-log "... SSH server restarted"
+
+if [ $? -eq 0 ]; then
+	log "... SSH server restarted"
+else
+
+	# ssh config change failed. Rollback the changes
+	# replace the previously backed up sshd_config
+	log "FATAL ERROR: SSHD failed to restart. Attempting rollback" 
+	log "INFO: In case rollback fails and we lose ssh access, please use VNC"
+	cp $INSTALL_FOLDER/sshd_config /etc/ssh/
+	# attempt to restart the server once again
+	service sshd restart
+	# abort the mission
+	exit -1
+fi
 echo "SSH Server is updated. SSH port set to $SSH_PORT. Remember to login using keyfile next time!"
 
 #--------------------------------------------------------
 #        INSTALLING WEB SERVER
 #--------------------------------------------------------
-log "Install Apache webserver..."
-yum install httpd 
+# Apache webserver installation starts
+# we will use yum command. To avoid interaction, we will use -y consenting switch
+# If apache is already present, this command will do nothing
 
+log "Install Apache webserver..."
+yum -y install httpd 
 if [ $? -eq 0 ]; then
  log "Apache installed"
 else
  log "Apache installation failed"
- echo "Apache installation failed"
  exit -1 
 fi
 
-echo "In the following step we configure Apache Webserver as a virtual host"
-echo "Please specify your primary website name:"
-read SITENAME
+
+# In this step, we will try to determine our primary website name from
+# fleeting bunny configuration file. In case, we fail to determine this
+# we will prompt the user for input
+
+log "Trying to determine primary website name"
+SITENAME=$(grep SITENAME $FLEET_BUNN_CONFIG | cut -d'=' -f2)
+if [ "$SITENAME" == "" ]; then
+	log "WARNING: Primary site name not found in fleeting bunny config. Prompting for input"
+	echo "In the following step we configure Apache Webserver as a virtual host"
+	echo "Please specify your primary website name (e.g. example.com):"
+	read SITENAME
+fi
+log "Primary site name determined as $SITENAME"
+
+# In this step, we will create the directory structure required to store our websites
+# we will also grant necessary permissions to apache user
+# If any given website found to be existing, we will prompt user for overwrite
 
 log "Creating document root"
+if [ -d "/var/www/$SITENAME" ]; then
+	echo "The directory already exists. Overwrite it? (y/n)"
+	read ANSWER;
+	if [ "$ANSWER" == "y" ]; then
+		log "Specified directory exists, removing the same"
+		rm -rf /var/www/$SITENAME
+	else 
+		log "The specified directory already exists"
+		exit -1
+	fi
+fi
+mkdir -p /var/www/$SITENAME/public_html
+if [ $? -ne 0 ]; then
+ log "Could not create directory /var/www/$SITENAME/public_html" 
+ exit -1 
+fi
+log "Creating other directories for logging, backup etc."
+mkdir -p /var/www/$SITENAME/log
+mkdir -p /var/www/$SITENAME/backup
 
+log "Granting ownership of web directories to www user"
+chown -R apache:apache /var/www/$SITENAME/public_html
+if [ $? -ne 0 ]; then
+ log "chown failed to change permission" 
+ exit -1 
+fi
+log "Granting ownership of log directories to www user"
+chown -R apache:apache /var/www/$SITENAME/log
+
+log "Granting world-read permission to web directory"
+chmod 755 /var/www/$SITENAME/public_html
+
+log "Revoking world read permission from log and backup directory"
+chmod 750 /var/www/$SITENAME/log
+chmod 700 /var/www/$SITENAME/backup
+
+# Apache Configuration
+# ---------------------------------------------------------------------------------------
+# Now that Apache web server is installed and running, and directory structures
+# are created, we will start configuring the server. This includes setting up 
+# ports, host details (that is the website details), and some security and performance
+# configurations.
+
+log "Starting Apache Configuration.."
+
+# The apache configuration is stored typically in httpd.conf file. The location of
+# this configuration file can be varied depending on the system. In the following
+# section, we will try to determine this location. One way to determine this location
+# is to qyery the apache binary itself. Apache binary (httpd) when queries with -V 
+# switch, shows many information and server configuration file location is one of them.
+# (For more please refer to httpd man pages)
+# To do this, however, we will need to first determine the apache binary location
+
+log "Determine httpd binary location.."
+APACHE_LOC=$(whereis -b httpd | cut -d' ' -f2)
+log "httpd located at $APACHE_LOC"
+log "Querying apache bin to determine Apache root location"
+APACHE_ROOT_LOC=$($APACHE_LOC -V | grep HTTPD_ROOT | cut -d'"' -f2)
+log "Querying apache bin to determine Apache conf file location"
+APACHE_CONFIG_LOC=$($APACHE_LOC -V | grep SERVER_CONFIG_FILE | cut -d'"' -f2)
+APACHE_CONFIG_LOC="${APACHE_ROOT_LOC}/${APACHE_CONFIG_LOC}"
+log "Config file is determined to be located at $APACHE_CONFIG_LOC"
+
+# Now, before we start making any modification to the apache config file,
+# it is good idea to take a backup of this file. If anything goes wrong, we can rollback
+
+log "Backing up config file"
+cp $APACHE_CONFIG_LOC $INSTALL_FOLDER
+if [ $? -ne 0 ]; then
+	log "Failed to backup Apache Config. Exiting"
+	exit -1
+fi
+
+# From this point on, we start making the actual modifications in apache config.
+# Apache config is largely divided in 3 sections. 
+# - The 1st section deals with Apache server process as a whole.
+# - The 2nd section define the parameters of the 'main' or 'default' server
+# - The 3rd section contains all the settings for virtual hosts
+# (For details, please read 
+# http://www.techrepublic.com/article/learn-how-to-configure-apache/ )
+# 
+# The apache config file is mainly written as key-value pairs. The key is called 
+# directive and the value of the key is specified after one (or more) blank space.
+# For example, in the following line, "Listen" is a directive and "8080" is the value
+# Listen 8080  
+#
+# The technique that we are using below to modify / change directive values is 
+# a line-editor in-place replacement. We are using 'sed' as a line editing tool.
+# sed -i 's/find/replace/' configfile
+# A command like above will read the file "configfile" and replace the string "find"
+# with the string "replace"
+#
+
+# Configuring Apache Server Port
+# This is the port where apache server will be listening for incoming connections
+# As always, we first search in Fleeting Bunny config, if not available, we prompt user
+
+APACHE_PORT=$(grep APACHE_PORT $FLEET_BUNN_CONFIG | cut -d'=' -f2)
+if [ "$APACHE_PORT" == "" ]; then
+	log "Apache Port value missing in config file. Prompting for user input"
+	echo "By Default webservers execute at port 80. You may want to change this"
+	echo "Please enter new port number. Just enter to retain default value"
+	read APACHE_PORT
+	if [ "$APACHE_PORT" == "" ]; then
+		APACHE_PORT="80"
+	fi
+fi
+log "Setting Listener port to $APACHE_PORT"
+sed -i "s/^Listen .*/Listen $APACHE_PORT/" $APACHE_CONFIG_LOC
+if [ $? -ne 0 ]; then
+	log "Failed to modify PORT in Apache Config. Exiting"
+	exit -1
+fi
+
+# setting up server as Virtual Host
+# Virtual Host setting is generally available in the 3rd section of Apache Config
+# We are setting the server as virtual host as in the future we might want to host
+# multiple websites from the same server
+
+log "Setting up virtual host"
+sed -i "s/^#NameVirtualHost .*/NameVirtualHost *:80/" $APACHE_CONFIG_LOC
+if [ $? -ne 0 ]; then
+	log "Failed to uncomment NameVirtualHost in Apache Config. Exiting"
+	exit -1
+fi
+
+log "Downloading the virtual host configuration template..."
+wget --quiet --tries=3 --output-document=virtual_template.sh https://raw.github.com/akash-mitra/fleeting-bunny/master/apache_virtual_host_template.sh
+if [ $? -ne 0 ]; then
+	log "Failed to download virtual host template. Using default configuration"
+	
+	echo "# Following lines are added by Fleeting Bunny" > virtual_template.sh
+	echo "# This is a static configuration!" >> virtual_template.sh
+	echo "<VirtualHost *:80>" >> virtual_template.sh
+    echo "ServerAdmin __SERVER_ADMIN__" >> virtual_template.sh
+    echo "DocumentRoot __DOCUMENT_ROOT__" >> virtual_template.sh
+    echo "ServerName __SERVER_NAME__" >> virtual_template.sh
+    echo "ErrorLog __ERROR_LOG__" >> virtual_template.sh
+    echo "CustomLog __CUSTOM_LOG__ combined" >> virtual_template.sh
+	echo "</VirtualHost>" >> virtual_template.sh
+fi
+
+# Following are some mandatory configuration that we must do in order to setup
+# virtual hosting environment under Apache. If we are unable to setup any of these
+# values, we exit. At the end of setting up these values in template, we push the
+# template to actual config file.
+
+log "Setting up mandatory configuration values in template"
+sed -i "s/__SERVER_ADMIN__/webmaster@${SITENAME}/" virtual_template.sh
+if [ $? -ne 0 ]; then
+	echo "Failed to setup server admin. Exiting"
+	exit -1
+fi
+sed -i "s~__DOCUMENT_ROOT__~/var/www/$SITENAME/public_html~" virtual_template.sh
+if [ $? -ne 0 ]; then
+	echo "Failed to setup document root. Exiting"
+	exit -1
+fi
+sed -i "s/__SERVER_NAME__/www.$SITENAME/" virtual_template.sh
+if [ $? -ne 0 ]; then
+	echo "Failed to setup server name. Exiting"
+	exit -1
+fi
+sed -i "s~__ERROR_LOG__~/var/www/$SITENAME/log/error~" virtual_template.sh
+if [ $? -ne 0 ]; then
+	echo "Failed to setup error log. Exiting"
+	exit -1
+fi
+sed -i "s~__CUSTOM_LOG__~/var/www/$SITENAME/log/access~" virtual_template.sh
+if [ $? -ne 0 ]; then
+	echo "Failed to setup access log. Exiting"
+	exit -1
+fi
+log "adding the configured virtual host to apache config"
+cat virtual_template.sh >> $APACHE_CONFIG_LOC
+
+
+# At this point, we have successfully setup all the necessary values for virtual 
+# server. We will restart apache to check if everything is alright.
+# In case of failure, we will rollback the changes.
+log "stopping all apache processes"
+apachectl -k stop
+log "starting apache again..."
+/etc/init.d/httpd start
+if [ $? -ne 0 ]; then
+    log "FATAL ERROR: Apache failed to restart. Attempting to re-instate server config"
+    cp $APACHE_CONFIG_LOC $INSTALL_FOLDER/httpd.conf.debug
+    cp $INSTALL_FOLDER/httpd.conf $APACHE_CONFIG_LOC
+    log "A copy of current apache conf is stored in $INSTALL_FOLDER for debug purpose"
+	log "Attempting restart again"
+	/etc/init.d/httpd start
+	exit -1
+else
+	log "Apache server restarted successfully with virtual hosting environment"
+fi
