@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 #-------------------------------------------------------
 # This script will setup a virgin server
 # as a webserver with following softwares
@@ -14,6 +14,12 @@
 # - Intital Version
 #
 #---------------------------------------------------------
+
+set -o pipefail
+
+__DIR__="$(cd "$(dirname "${0}")"; echo $(pwd))"
+__BASE__="$(basename "${0}")"
+__FILE__="${__DIR__}/${__BASE__}"
 
 # user defined function for logging
 log () { echo "`hostname` | `date '+%F | %H:%M:%S |'` $1"; }
@@ -31,14 +37,18 @@ FLEET_BUNN_CONFIG="./input.ini"
 
 # run the wizard first to get all the configuration information from user
 # show a prompt
+
 clear
 echo "----------------------------------------------------------------------"
-echo " /\\ /\\"
-echo " \\/_\\/"
-echo " ( o o )"
-echo " \\ | /"
-echo " ==="
-echo " / \\"
+echo "                      (\\_          _/)"
+echo "                      )  (        )  ("
+echo "                     (    (      )    )"
+echo "                      )_(\\ \\.--./ /)_("
+echo "                        \`)\` 6  6 '('"
+echo "                         /        \\"
+echo "                         (   []   )"
+echo "                         \`(_c__c_)\`"
+echo "                            \`--\`"
 echo "----------------------------------------------------------------------"
 echo " FLEETING BUNNY - Webhost configuration tool version $VERSION"
 echo "----------------------------------------------------------------------"
@@ -48,26 +58,45 @@ clear
 
 
 # check if root, if not get out
-if [ `whoami` != "root" ]; then
-echo "Run this program as root"
+if [ `id -u` != "0" ]; then
+echo "Run this ${__FILE__} as root"
  exit -1
 else
 log "Initiating Setup script version: $VERSION as root"
 fi
 
+# check if the Fleeting Bunny config file already exists.
+# If not we will just create a blank file to avoid "File Not Found"
+# ugly error messages through out the setup process
+
+if [ ! -f $FLEET_BUNN_CONFIG ]; then
+   log "WARNING! Fleeting Bunny config file not present"
+   echo "# Blank Fleeting Bunny Configuration File - AUTO CREATED" > $FLEET_BUNN_CONFIG
+fi
+ 
 # Log current system state
-log "uptime: `uptime`"
 log "System Details: `uname -a`"
 log "IP address is : `ifconfig eth0 | grep "inet " | cut -d':' -f2 | cut -d' ' -f1`"
 
+# perform a quick server benchmarking to take note of various 
+# server parameters such as CPU, RAM, I/O speed etc
+
+log "Attempt to perform server benchmarking..."
+wget --quiet --tries=3 https://raw.github.com/akash-mitra/fleeting-bunny/master/profile.sh
+if [ $? -eq 0 ]; then
+	bash profile.sh
+else
+	log "WARNING: Failed to download Profile.sh. Possible connection issue"
+fi
+
 # update and upgrade the server
 log "Performing yum update"
-## yum -y update >/dev/null
+yum -y update >/dev/null
 if [ $? -eq 0 ]; then
 log "Update successful"
 fi
 log "Attempting to upgrade server"
-## yum -y upgrade > /dev/null
+yum -y upgrade > /dev/null
 if [ $? -eq 0 ]; then
 log "Upgrade Successful"
 fi
@@ -104,38 +133,66 @@ log "Strengthening the security of the SSH server..."
 cp /etc/ssh/sshd_config $INSTALL_FOLDER
 log "Backed up sshd_config under $INSTALL_FOLDER"
 
-# Values for following variables need to be setup
-# Port __PORT__
-# LoginGraceTime __GRACE_TIME__
-# PermitRootLogin __PERMIT_ROOT__
-# MaxAuthTries __MAX_AUTH_TRY__
-# MaxSessions __MAX_SESSION_COUNT__
-# PasswordAuthentication __PASS_AUTH__
-# X11Forwarding __X11_FORWARD__
-# ClientAliveInterval __CLIENT_ALIVE__
-# Banner __BANNER__
+# We begin by changing the default configuration of the SSH server
+# By default SSH listens to Port 22 and allows password based
+# authentication. This allows attacker to brute-force the credentials
+# by trying random passwords to obtain SSH access. On the contrary,
+# by using Public/Private keys for authentication, we can ensure that
+# only holder of the encrypted key can get access to the system.
+# 
+# Values of some other SSH config parameters are also changed.
+# - Port 
+# - LoginGraceTime 
+# - PermitRootLogin 
+# - MaxAuthTries 
+# - MaxSessions 
+# - PasswordAuthentication 
+# - X11Forwarding 
+# - ClientAliveInterval 
+# - Banner 
 
-echo "Default SSH Port is 22. We suggest you change it."
-echo "Question 1: Which port would you like to run your SSH client [1024-65000]?"
-read SSH_PORT
+SSH_PORT=$(grep SSH_PORT $FLEET_BUNN_CONFIG | cut -d'=' -f2)
+if [ "$SSH_PORT" == "" ]; then
+	log "WARNING! SSH port info not available in config file. Will prompt user"
+	echo "Default SSH Port is 22. We suggest you change it."
+	echo "Question 1: Which port would you like to run your SSH client [1024-65000]?"
+	read SSH_PORT
+fi
 sed -i "s/__PORT__/$SSH_PORT/g" $SSH_CONFIG_FILE
 log "SSH Port to be set to [$SSH_PORT]"
 
-echo "We suggest you disable password authentication for other users as well."
-echo "When you disable password, you will need key file to login"
-echo "Question 2: Should we keep password authentication (yes / no)?"
-read PASS_DISABLE
+PASS_DISABLE=$(grep PASS_DISABLE $FLEET_BUNN_CONFIG | cut -d'=' -f2)
+if [ "$PASS_DISABLE" == "" ]; then
+	log  "WARNING! SSH Password Auth info not available in config file. Will prompt user"
+	echo "We suggest you disable password authentication for other users as well."
+	echo "When you disable password, you will need key file to login"
+	echo "Question 2: Should we keep password authentication (yes / no)?"
+	read PASS_DISABLE
+fi
 sed -i "s/__PASS_AUTH__/$PASS_DISABLE/g" $SSH_CONFIG_FILE
 log "Password based login to be disabled to other users as well"
 
-log "LoginGraceTime to be set to 60 seconds. (server disconnects if user is not logged-in by this time)"
-sed -i "s/__GRACE_TIME__/60/g" $SSH_CONFIG_FILE
+GRACE_TIME=$(grep GRACE_TIME $FLEET_BUNN_CONFIG | cut -d'=' -f2)
+if [ "$GRACE_TIME" == "" ]; then
+	log "WARNING: LoginGraceTime is not available in config file. Will be defaulted to 60 seconds"
+	GRACE_TIME=60
+else 
+	log "LoginGraceTime will be set to $GRACE_TIME as per config file"
+fi
+sed -i "s/__GRACE_TIME__/$GRACE_TIME/g" $SSH_CONFIG_FILE
 
 log "Root login to be permitted to the server"
 sed -i "s/__PERMIT_ROOT__/yes/g" $SSH_CONFIG_FILE
 
-log "MaxAuthTries to be set to 4 (maximum number of authentication attempts permitted per connection)"
-sed -i "s/__MAX_AUTH_TRY__/4/g" $SSH_CONFIG_FILE
+
+MAX_AUTH_TRY=$(grep MAX_AUTH_TRY $FLEET_BUNN_CONFIG | cut -d'=' -f2)
+if [ "$MAX_AUTH_TRY" == "" ]; then
+	log "WARNING: MaxAuthTries is not available in config file. Will be defaulted to 4"
+	MAX_AUTH_TRY=4
+else 
+	log "MaxAuthTries will be set to $MAX_AUTH_TRY as per config file"
+fi
+sed -i "s/__MAX_AUTH_TRY__/$MAX_AUTH_TRY/g" $SSH_CONFIG_FILE
 
 log "Max session count to be set to 6" 
 sed -i "s/__MAX_SESSION_COUNT__/6/g" $SSH_CONFIG_FILE
@@ -217,13 +274,14 @@ if [ -d "/var/www/$SITENAME" ]; then
 		log "Specified directory exists, removing the same"
 		rm -rf /var/www/$SITENAME
 	else 
-		log "The specified directory already exists"
+		log "Exiting the process as the directory already exists"
 		exit -1
 	fi
 fi
-mkdir -p /var/www/$SITENAME/public_html
+WEB_ROOT="/var/www/$SITENAME/public_html"
+mkdir -p $WEB_ROOT
 if [ $? -ne 0 ]; then
- log "Could not create directory /var/www/$SITENAME/public_html" 
+ log "Could not create directory $WEB_ROOT" 
  exit -1 
 fi
 log "Creating other directories for logging, backup etc."
@@ -231,7 +289,7 @@ mkdir -p /var/www/$SITENAME/log
 mkdir -p /var/www/$SITENAME/backup
 
 log "Granting ownership of web directories to www user"
-chown -R apache:apache /var/www/$SITENAME/public_html
+chown -R apache:apache $WEB_ROOT
 if [ $? -ne 0 ]; then
  log "chown failed to change permission" 
  exit -1 
@@ -240,7 +298,7 @@ log "Granting ownership of log directories to www user"
 chown -R apache:apache /var/www/$SITENAME/log
 
 log "Granting world-read permission to web directory"
-chmod 755 /var/www/$SITENAME/public_html
+chmod 755 $WEB_ROOT
 
 log "Revoking world read permission from log and backup directory"
 chmod 750 /var/www/$SITENAME/log
@@ -389,7 +447,8 @@ cat virtual_template.sh >> $APACHE_CONFIG_LOC
 
 # At this point, we have successfully setup all the necessary values for virtual 
 # server. We will restart apache to check if everything is alright.
-# In case of failure, we will rollback the changes.
+# In case of failure, we will rollback the changes
+
 log "stopping all apache processes"
 apachectl -k stop
 log "starting apache again..."
@@ -404,4 +463,49 @@ if [ $? -ne 0 ]; then
 	exit -1
 else
 	log "Apache server restarted successfully with virtual hosting environment"
+	log "Adding entry in chkconfig so that apache run automatically when the server boots"
+	sudo chkconfig httpd on
 fi
+
+# Now that Apache is restarted, we will put a small file in the 
+# server root so that we can test the webserver by pointing browser here
+
+echo "<html><head><title>Fleeting Bunny - Apache with virtual host</title></head><body>" > ${WEB_ROOT}/index.html
+echo "<h1>Fleeting Bunny</h1><hr />Hostname: `hostname`</body></html>" >> ${WEB_ROOT}/index.html
+
+#--------------------------------------------------------
+#        INSTALL PHP
+#--------------------------------------------------------
+
+log "Starting PHP installation"
+INSTALL_PHP=$(grep INSTALL_PHP $FLEET_BUNN_CONFIG | cut -d'=' -f2)
+if [ "$INSTALL_PHP" == "" ]; then
+	log "No explicit directive about PHP installation in config file. Will prompt"
+	echo "Do you want to install PHP? (y / N)"
+	read INSTALL_PHP
+fi
+if [ "$INSTALL_PHP" == "1" ] || [ "$INSTALL_PHP" == "y" ] || [ "$INSTALL_PHP" == "Y" ]; then
+	log "starting PHP installation"
+	yum -y install php php-mysql > /dev/null
+	if [ $? -ne 0 ]; then
+		log "FATAL ERROR: Failed to install PHP or PHP-MYSQL"
+		exit -1
+	else
+		log "`php --version | head -1` installed successfully" 
+	fi
+	
+	# Once the PHP is installed in the above step, we will check if we need to 
+	# install other PHP modules / modify anything for the proposed content
+	# management system. For example, CMS like Joomla or WordPress may require 
+	# certain other PHP module or certain changes in php.ini
+	
+	CMS=$(grep CMS $FLEET_BUNN_CONFIG | cut -d'=' -f2)
+	if [ "$CMS" == "joomla" ] || [ "$CMS" == "Joomla" ] || [ "$CMS" == "JOOMLA" ]; then
+		log "Joomla is scheduled to be installed as CMS. Checking additional packages for Joomla"
+		
+		# Magic Quote GPC changes
+		# TODO
+	fi
+else
+	log "WARNING: Skipping PHP Installation"
+fi 
