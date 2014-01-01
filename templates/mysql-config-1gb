@@ -1,0 +1,24 @@
+[mysqld]
+datadir=/var/lib/mysql
+socket=/var/lib/mysql/mysql.sock
+user=mysql
+
+# Default to using old password format for compatibility with mysql 3.x
+# clients (those using the mysqlclient10 compatibility package).
+old_passwords=1
+
+# Disabling symbolic-links is recommended to prevent assorted security risks;
+symbolic-links=0
+
+# performance parameters
+key_buffer = 32M
+max_allowed_packet = 1M
+thread_stack = 128K
+table_cache = 32
+sort_buffer = 128K
+net_buffer_length = 4K
+bind-address = 127.0.0.1
+
+[mysqld_safe]
+log-error=/var/log/mysqld.log
+pid-file=/var/run/mysqld/mysqld.pid
