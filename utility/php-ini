@@ -1,0 +1,9 @@
+<?php
+$inipath = php_ini_loaded_file();
+
+if ($inipath) {
+    echo $inipath;
+} else {
+    echo '-1';
+}
+?>
