@@ -26,14 +26,11 @@ log () { echo "`hostname` | `date '+%F | %H:%M:%S |'` $1"; }
 
 # Set Default Parameter Values
 VERSION="0.01"
-HAS_MAIL_SERVER=1
-HAS_MTA=1
-HAS_MYSQL=1
-HAS_CMS=1
-CMS_TYPE=1
+MYSQL_CONFIG_LOC="/etc/my.cnf"
 INSTALL_FOLDER="/home/setup/"
 LOG_FILE="./setup.log"
 FLEET_BUNN_CONFIG="./input.ini"
+SSH_CONFIG_FILE="./sshd-config"
 
 # run the wizard first to get all the configuration information from user
 # show a prompt
@@ -82,7 +79,7 @@ log "IP address is : `ifconfig eth0 | grep "inet " | cut -d':' -f2 | cut -d' ' -
 # server parameters such as CPU, RAM, I/O speed etc
 
 log "Attempt to perform server benchmarking..."
-wget --quiet --tries=3 https://raw.github.com/akash-mitra/fleeting-bunny/master/profile.sh
+wget --quiet --tries=3 https://raw.github.com/akash-mitra/fleeting-bunny/master/utility/profile.sh
 if [ $? -eq 0 ]; then
 	bash profile.sh
 else
@@ -121,8 +118,8 @@ fi
 # download templates for different server config files
 rm -f sshd_template.sh
 log "Downloading SSH template..."
-wget --quiet --tries=3 https://raw.github.com/akash-mitra/fleeting-bunny/master/sshd_template.sh 2>&1 1> /dev/null
-SSH_CONFIG_FILE="./sshd_template.sh"
+wget --quiet --tries=3 --output-document=sshd-config https://raw.github.com/akash-mitra/fleeting-bunny/master/templates/sshd-config 2>&1 1> /dev/null
+
 
 #--------------------------------------------------------
 # securing the SSH server
@@ -395,7 +392,7 @@ if [ $? -ne 0 ]; then
 fi
 
 log "Downloading the virtual host configuration template..."
-wget --quiet --tries=3 --output-document=virtual_template.sh https://raw.github.com/akash-mitra/fleeting-bunny/master/apache_virtual_host_template.sh
+wget --quiet --tries=3 --output-document=virtual_template.sh https://raw.github.com/akash-mitra/fleeting-bunny/master/templates/apache-vhost
 if [ $? -ne 0 ]; then
 	log "Failed to download virtual host template. Using default configuration"
 	
@@ -463,6 +460,8 @@ if [ $? -ne 0 ]; then
 	exit -1
 else
 	log "Apache server restarted successfully with virtual hosting environment"
+	cp $APACHE_CONFIG_LOC $INSTALL_FOLDER/httpd.conf.custom
+	
 	log "Adding entry in chkconfig so that apache run automatically when the server boots"
 	sudo chkconfig httpd on
 fi
@@ -473,11 +472,57 @@ fi
 echo "<html><head><title>Fleeting Bunny - Apache with virtual host</title></head><body>" > ${WEB_ROOT}/index.html
 echo "<h1>Fleeting Bunny</h1><hr />Hostname: `hostname`</body></html>" >> ${WEB_ROOT}/index.html
 
+# Apache Fine Tuning
+# In the following section, we will perform a few fine tuning of Apache 
+# web server that may be useful for performance or security reasons.
+# Whether or not to perform this step, can be controlled by setting
+# FINE_TUNE_APACHE directive to 0 in FLEET BUNN config file
+
+FINE_TUNE_APACHE=$(grep FINE_TUNE_APACHE $FLEET_BUNN_CONFIG | cut -d'=' -f2)
+if [ "$FINE_TUNE_APACHE" != "0" ]; then
+	log "Fine Tuning Apache Web server..."
+	
+	# Hide Apache Server Signature
+	log "Switching off Server Signature"
+	sed -i 's/^ServerSignature .*/ServerSignature Off/' $APACHE_CONFIG_LOC
+	if [ $? -ne 0 ]; then
+		log "WARNING: Failed to change Apache directive: ServerSignature"
+	fi
+	
+	# Change ServerToken 
+	log "Switching off Server Token"
+	sed -i 's/^ServerTokens .*/ServerTokens ProductOnly/' $APACHE_CONFIG_LOC
+	if [ $? -ne 0 ]; then
+		log "WARNING: Failed to change Apache directive: ServerToken"
+	fi
+	
+	# TODO: server pool size regulation optimization 
+fi
+
+log "Apache optimization done. Restarting"
+apachectl -k stop
+/etc/init.d/httpd start
+if [ $? -ne 0 ]; then
+	log "Error: Could not restart Apache after optimization. Rolling back to previous state"
+	cp $APACHE_CONFIG_LOC $INSTALL_FOLDER/httpd.conf.debug
+	cp $INSTALL_FOLDER/httpd.conf.custom $APACHE_CONFIG_LOC
+	log "Rollback complete"
+	log "A copy of current apache conf is stored in $INSTALL_FOLDER for debug purpose"
+	log "Attempting restart again"
+	/etc/init.d/httpd start
+	if [ $? -ne 0 ]; then
+		log "FATAL ERROR: Recurrent error. Exiting"
+		exit -1
+	fi
+fi
+log "Apache restarted successfully"
+	
+
 #--------------------------------------------------------
 #        INSTALL PHP
 #--------------------------------------------------------
 
-log "Starting PHP installation"
+log "Checking directive for PHP installation"
 INSTALL_PHP=$(grep INSTALL_PHP $FLEET_BUNN_CONFIG | cut -d'=' -f2)
 if [ "$INSTALL_PHP" == "" ]; then
 	log "No explicit directive about PHP installation in config file. Will prompt"
@@ -499,6 +544,19 @@ if [ "$INSTALL_PHP" == "1" ] || [ "$INSTALL_PHP" == "y" ] || [ "$INSTALL_PHP" ==
 	# management system. For example, CMS like Joomla or WordPress may require 
 	# certain other PHP module or certain changes in php.ini
 	
+	log "Determining the location of php.ini file from php_ini_loaded_file()"
+	log "Downloading php-ini"
+	wget --quiet --tries=3 --output-document=php-ini.php https://raw.github.com/akash-mitra/fleeting-bunny/master/utility/php-ini 2>&1 1> /dev/null
+	if [ $? -eq 0 ]; then
+		PHP_CONFIG_LOC=`php php-ini.php`
+	else
+		log "WARNING: Failed to download php-ini.php. Possible connection issue"
+		log "Checking php.ini in the default location"
+		PHP_CONFIG_LOC="/etc/php.ini"
+	fi
+	log "php.ini located at $PHP_CONFIG_LOC"
+	
+	
 	CMS=$(grep CMS $FLEET_BUNN_CONFIG | cut -d'=' -f2)
 	if [ "$CMS" == "joomla" ] || [ "$CMS" == "Joomla" ] || [ "$CMS" == "JOOMLA" ]; then
 		log "Joomla is scheduled to be installed as CMS. Checking additional packages for Joomla"
@@ -508,4 +566,163 @@ if [ "$INSTALL_PHP" == "1" ] || [ "$INSTALL_PHP" == "y" ] || [ "$INSTALL_PHP" ==
 	fi
 else
 	log "WARNING: Skipping PHP Installation"
-fi 
+fi
+
+
+# --------------------------------------------------------
+#       INSTALL MySQL
+# --------------------------------------------------------
+
+log "Checking directive for MySQL database installation"
+INSTALL_MYSQL=$(grep INSTALL_MYSQL $FLEET_BUNN_CONFIG | cut -d'=' -f2)
+if [ "$INSTALL_MYSQL" == "" ]; then
+	log "No explicit directive about MySQL installation in config file. Will prompt"
+	echo "Do you want to install MySQL database? (y / N)"
+	read INSTALL_MYSQL
+fi
+if [ "$INSTALL_MYSQL" == "1" ] || [ "$INSTALL_MYSQL" == "y" ] || [ "$INSTALL_MYSQL" == "Y" ]; then
+	log "Starting MySQL database installation"
+	
+	# The Database can be installed in the same machine or in some other machine
+	# Depending on the value of the parameter LOCAL_DATABASE, installation location
+	# may vary. If LOCAL_DATABASE is set to 0, the database will be installed in
+	# a separate machine (TODO). For all the other values of this parameter (including
+	# the cases where this parameter is not set, the database will be installed on the
+	# local machine.
+	
+	LOCAL_DATABASE=$(grep LOCAL_DATABASE $FLEET_BUNN_CONFIG | cut -d'=' -f2)
+	if [ "$LOCAL_DATABASE" == "0" ]; then
+		# Remote database installation
+		log "The database will be installed in remote machine"
+		# TODO
+	else # local installation
+		log "The database will be installed in the local machine"
+		yum -y install mysql-server mysql-client
+		
+		if [ $? -ne 0 ]; then
+			log "FATAL ERROR: Failed to install MYSQL Server and Client"
+			exit -1
+		else
+			log "`mysql -h localhost -V` installed successfully" 
+		fi
+		
+		log "Attempting to start MySQL"
+		service mysqld start
+		if [ $? -ne 0 ]; then
+			log "FATAL ERROR: Failed to start MySQL Server"
+			exit -1
+		else
+			log "MySQL started successfully" 
+			log "Adding entry to chkconfig so that mysql starts automatically at server startup"
+			/sbin/chkconfig --levels 235 mysqld on
+		fi
+		
+		#
+		# we need to configure MySQL after installation is over
+		# This will include: 
+		#   - change the MySQL root password 
+		#   - remove anonymous user accounts
+		#   - disable root logins outside of localhost
+		#   - remove test databases
+		# We will also create a new database and associate a new user 
+		# with the database
+		#
+		
+		# determine the database name to be created
+		# If name not present, enter a default name
+		MYSQL_NAME=$(grep MYSQL_NAME $FLEET_BUNN_CONFIG | cut -d'=' -f2)
+		if [ "$MYSQL_NAME" == "" ]; then
+			MYSQL_NAME="`hostname`_d1"
+		fi
+		
+		# determine database user name to be associated with the new database
+		# If user name not present, enter a default name
+		MYSQL_USER=$(grep MYSQL_USER $FLEET_BUNN_CONFIG | cut -d'=' -f2)
+		if [ "$MYSQL_USER" == "" ]; then
+			MYSQL_USER="`hostname`_u1"
+		fi
+		
+		# determine mysql password from config file for the new database
+		# if no password is provided, generate some random password of 8 character
+		MYSQL_PASS=$(grep MYSQL_PASS $FLEET_BUNN_CONFIG | cut -d'=' -f2)
+		if [ "$MYSQL_PASS" == "" ]; then
+			MYSQL_PASS=`openssl rand -base64 8`
+		fi
+		
+		# generate some random root password for MySQL root
+		MYSQL_ROOTPWD=`openssl rand -base64 12`
+		
+		# create a new temp .sql file with our commands that we will execute 
+		# against the newly created database
+		MYSQL_TMPFILE=`mktemp --suffix=.sql`
+
+		echo "UPDATE mysql.user SET Password=PASSWORD('${MYSQL_ROOTPWD}') WHERE User='root';" > $MYSQL_TMPFILE
+		echo "DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');" >> $MYSQL_TMPFILE
+		echo "DELETE FROM mysql.user WHERE User='';" >> $MYSQL_TMPFILE
+		echo "DROP DATABASE test;" >> $MYSQL_TMPFILE
+		echo "DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';" >> $MYSQL_TMPFILE
+		
+		# create a new database with new user
+		echo "CREATE DATABASE ${MYSQL_NAME} CHARACTER SET 'utf8';" >> $MYSQL_TMPFILE
+		echo "CREATE USER '${MYSQL_USER}'@'127.0.0.1' IDENTIFIED BY '${MYSQL_PASS}';" >> $MYSQL_TMPFILE
+		echo "CREATE USER '${MYSQL_USER}'@localhost IDENTIFIED BY '${MYSQL_PASS}';" >> $MYSQL_TMPFILE
+		echo "GRANT ALL PRIVILEGES ON ${MYSQL_NAME}.* TO '${MYSQL_USER}'@'127.0.0.1';" >> $MYSQL_TMPFILE
+		echo "GRANT ALL PRIVILEGES ON ${MYSQL_NAME}.* TO '${MYSQL_USER}'@localhost;" >> $MYSQL_TMPFILE
+		echo "flush privileges;" >> $MYSQL_TMPFILE
+		
+		cat $MYSQL_TMPFILE | mysql -u root
+		
+		if [ $? -ne 0 ]; then
+			log "WARNING: SQL execution error"
+		else
+			log "MySQL configuration done"
+			# rm $MYSQL_TMPFILE
+		fi
+		
+		# 
+		# Changing a few configuration parameter in my.cnf
+		# Following configurations are set for an initial setting
+		# assuming the node has 1 GB memory. All of these config
+		# should be re-evaluated once MySQL is run for few days in full
+		# production environment. For the later stage of optimization, one
+		# good place to start is MySQL tuning primer code available at
+		# https://launchpadlibrarian.net/78745738/tuning-primer.sh
+		#
+		log "Taking back-up of my.cnf"
+		cp $MYSQL_CONFIG_LOC $INSTALL_FOLDER
+		if [ $? -ne 0 ]; then
+			log "Failed to backup MySQL Config. Exiting"
+			exit -1
+		fi
+		
+		log "Modifying my.cnf file with recommended values for 1GB node"
+		log "Downloading MySQL config file template..."
+		
+		wget --quiet --tries=3 --output-document=my.cnf https://raw.github.com/akash-mitra/fleeting-bunny/master/templates/mysql-config-1gb
+		if [ $? -eq 0 ]; then
+			log "Replacing $MYSQL_CONFIG_LOC with downloaded my.cnf"
+			cp ./my.cnf $MYSQL_CONFIG_LOC
+		else
+			log "WARNING: Failed to download MySQL Config file. Possible connection issue"
+		fi
+		
+		log "Attempting MySQL database restart"
+		service mysqld restart
+		if [ $? -ne 0 ]; then
+			log "WARNING: Server failed to start"
+			log "Restoring default my.cnf"
+			cp ${INSTALL_FOLDER}/my.cnf ${MYSQL_CONFIG_LOC}
+			log "Attempting MySQL database restart (2nd time)"
+			service mysqld restart
+			if [ $? -ne 0 ]; then
+				log "FATAL ERROR: MySQL failed to restart. Exiting"
+				exit -1
+			fi
+		fi
+		
+		log "MySQL database restarted successfully"
+		
+	fi # end of local install
+else
+	log "WARNING: Skipping MySQL Installation"
+fi
