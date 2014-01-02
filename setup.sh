@@ -7,11 +7,16 @@
 # - Mail Transfer Agent (Optional)
 # - MySQL database server (optional)
 # - Joomla CMS or Joomla CMS with Gantry Framework
-# - CSF Firewall + Additional Security Rules
+# - Firewall + Additional Security Rules
 # - Also sets-up LFD and a few monitoring systems
 #
-# Version : 0.01 | Date: 09 Dec 2013 | Owner: Akash
-# - Intital Version
+# Owner: Akash
+# 
+# Change History: 
+# VER  | DATE        | COMMENT       
+# --------------------------------------------------------
+# 0.01 | 09 Dec 2013 | Initial Draft Version
+# 0.1  | 29 Dec 2013 | Beta - full AMP capability 
 #
 #---------------------------------------------------------
 
@@ -539,6 +544,21 @@ if [ "$INSTALL_PHP" == "1" ] || [ "$INSTALL_PHP" == "y" ] || [ "$INSTALL_PHP" ==
 		log "`php --version | head -1` installed successfully" 
 	fi
 	
+	# TODO: PHP Hardening:
+	# Many of PHP's inherent security issues can be resolved by using 3rd
+	# party packages such as Suhosin that can potentially harden the php 
+	# installation from attacks from hackers etc. Suhosin implements a few 
+	# low-level protections against bufferoverflows or format string vulnerabilities
+	# along with other protections. To know more about suhosin, visit:
+	# http://www.hardened-php.net/suhosin/a_feature_list.html
+	# 
+	# Installing suhosin is as easy as below:
+	# yum install php-suhosin
+	# 
+	# However considering the possibility of any compatibility issues with Joomla
+	# I defer Suhosin installation code until 2.0 stable release of fleeting-bunny
+	
+	
 	# Once the PHP is installed in the above step, we will check if we need to 
 	# install other PHP modules / modify anything for the proposed content
 	# management system. For example, CMS like Joomla or WordPress may require 
@@ -556,6 +576,28 @@ if [ "$INSTALL_PHP" == "1" ] || [ "$INSTALL_PHP" == "y" ] || [ "$INSTALL_PHP" ==
 	fi
 	log "php.ini located at $PHP_CONFIG_LOC"
 	
+	
+	# configuring PHP memory limit
+	# we do not change the default memory limit (128MB) until and unless a 
+	# override value is provided in fleeting bunny config
+	
+	PHP_MEMORY_LIMIT=$(grep PHP_MEMORY_LIMIT $FLEET_BUNN_CONFIG | cut -d'=' -f2)
+	if [ "$PHP_MEMORY_LIMIT" == "" ]; then
+		log "No PHP memory limit override found. Default value will be retained"
+	else
+		sed -i "s~^memory_limit .*$~memory_limit = ${PHP_MEMORY_LIMIT}~" $PHP_CONFIG_LOC
+		if [ $? -eq 0 ]; then
+			log "PHP memory limit is to be set to [${PHP_MEMORY_LIMIT}]"
+		else
+			log "ERROR: Error changing PHP memory limit to [${PHP_MEMORY_LIMIT}]"
+		fi
+	fi
+	
+	# TODO: change the php error_log location to site specific log folder?
+	# This can be easily done by changing the "error_log" switch in PHP's
+	# php.ini file. Need to think if this is to be done 
+	
+	# we will check the default CMS to be installed, and configure PHP accordingly
 	
 	CMS=$(grep CMS $FLEET_BUNN_CONFIG | cut -d'=' -f2)
 	if [ "$CMS" == "joomla" ] || [ "$CMS" == "Joomla" ] || [ "$CMS" == "JOOMLA" ]; then
