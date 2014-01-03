@@ -29,6 +29,9 @@ __FILE__="${__DIR__}/${__BASE__}"
 # user defined function for logging
 log () { echo "`hostname` | `date '+%F | %H:%M:%S |'` $1"; }
 
+# this function returns configuration value for a given parameter
+getConfigValue () { PASS_DISABLE=$(grep PASS_DISABLE $FLEET_BUNN_CONFIG | cut -d'=' -f2) }
+
 # Set Default Parameter Values
 VERSION="0.01"
 MYSQL_CONFIG_LOC="/etc/my.cnf"
