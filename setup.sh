@@ -922,7 +922,7 @@ echo "-A INPUT -p tcp --dport $SSH_PORT -m state --state NEW -s 0.0.0.0/0 -j ACC
 
 # Accept inbound ICMP messages
 debug "Limiting ping to 2 packets per second"
-echo "-A PACKET -p icmp -m icmp --icmp-type 8 -m limit --limit 2/sec -j ACCEPT" >> firewall.rule
+echo "-A INPUT -p icmp -m icmp --icmp-type 8 -m limit --limit 2/sec -j ACCEPT" >> firewall.rule
 
 # And if the server is not acting as a router, we drop all the FORWARD packets
 PACKET_FORWARDING=$(getConfigValue "PACKET_FORWARDING")
@@ -941,4 +941,5 @@ fi
 echo "-A INPUT -j DROP" >> firewall.rule
 
 # now apply these rules 
+echo "COMMIT" >> firewall.rule
 $IPTR < firewall.rule
