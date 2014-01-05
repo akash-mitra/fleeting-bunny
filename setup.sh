@@ -10,39 +10,86 @@
 # - Firewall + Additional Security Rules
 # - Also sets-up LFD and a few monitoring systems
 #
-# Owner: Akash
+# Licensed under MIT
+# Copyright (c) 2014 Akash R Mitra
+# http://be-a-hacker.com
 # 
+#  Usage:
+#  LOG_LEVEL=7 ./setup.sh [ini_file_name]
+#
 # Change History: 
 # VER  | DATE        | COMMENT       
-# --------------------------------------------------------
+# -------------------------------------------------------------------------
 # 0.01 | 09 Dec 2013 | Initial Draft Version
 # 0.1  | 29 Dec 2013 | Beta - full AMP capability 
-#
-#---------------------------------------------------------
+# 0.2  | 04 Jan 2014 | Using some parts from kvz.io Bash3 Boilerplate
+# 0.4  | 06 Jan 2014 | Added basic firewall rules
+#--------------------------------------------------------------------------
 
 set -o pipefail
+
+# Environment variables - setting default log level to info
+[ -z "${LOG_LEVEL}" ] && LOG_LEVEL="6" # 7 = debug -> 0 = emergency
 
 __DIR__="$(cd "$(dirname "${0}")"; echo $(pwd))"
 __BASE__="$(basename "${0}")"
 __FILE__="${__DIR__}/${__BASE__}"
 
+# Logging functions based on type of messages
+function critical ()  { [ "${LOG_LEVEL}" -ge 2 ] && log "FATAL ERROR: $1" || true; }
+function error ()     { [ "${LOG_LEVEL}" -ge 3 ] && log "ERROR: $1" || true; }
+function warning ()   { [ "${LOG_LEVEL}" -ge 4 ] && log "WARNING: $1" || true; }
+function info ()      { [ "${LOG_LEVEL}" -ge 6 ] && log "$1" || true; }
+function debug ()     { [ "${LOG_LEVEL}" -ge 7 ] && log "DEBUG: $1" || true; }
+
+# To show a friendly help message
+function help () {
+  echo ""
+  echo " ${@}"
+  echo ""
+  echo "Usage: $0 [ini_file_location]"
+  echo "     ini_file_location (Optional) - Full file path of fleeting bunny config file"
+  echo "     This can be either a local file or a remote file over HTTP"
+  echo "     For a list of supported configuration directives, please check README.txt"
+  exit 1
+}
+
+function cleanup_before_exit () {
+	rm -f ./input.ini*
+	rm -f ./profile.sh*
+	rm -f ./sshd-config*
+	rm -f ./virtual_template.sh*
+	rm -f ./php-ini.php*
+	info "Cleaning up. Done"
+}
+trap cleanup_before_exit EXIT
+
 # user defined function for logging
-log () { echo "`hostname` | `date '+%F | %H:%M:%S |'` $1"; }
+function log () { echo "`hostname` | `date '+%F | %H:%M:%S |'` $1"; }
 
 # this function returns configuration value for a given parameter
-getConfigValue () { PASS_DISABLE=$(grep PASS_DISABLE $FLEET_BUNN_CONFIG | cut -d'=' -f2) }
+function getConfigValue () {
+        local __ret__=$(grep "$1" $FLEET_BUNN_CONFIG | cut -d'=' -f2)
+        echo ${__ret__}
+}
 
 # Set Default Parameter Values
-VERSION="0.01"
+VERSION="0.4"
 MYSQL_CONFIG_LOC="/etc/my.cnf"
 INSTALL_FOLDER="/home/setup/"
 LOG_FILE="./setup.log"
 FLEET_BUNN_CONFIG="./input.ini"
 SSH_CONFIG_FILE="./sshd-config"
 
-# run the wizard first to get all the configuration information from user
-# show a prompt
+# check if root, if not get out
+if [ `id -u` != "0" ]; then
+	help "Run this ${__FILE__} as root"
+ 	exit -1
+else
+	info "Initiating Setup script version: $VERSION as root"
+fi
 
+# show a front screen 
 clear
 echo "----------------------------------------------------------------------"
 echo "                      (\\_          _/)"
@@ -57,65 +104,75 @@ echo "                            \`--\`"
 echo "----------------------------------------------------------------------"
 echo " FLEETING BUNNY - Webhost configuration tool version $VERSION"
 echo "----------------------------------------------------------------------"
-echo "Press any key to continue..."
-read input
-clear
+echo ""
 
+# check if fleeting bunny configuration file is provided as command line argument
+# This can be any local or remote file (over HTTP). If the file is provided and
+# the same is valid, we enter automatic mode, else we enter interactive mode
 
-# check if root, if not get out
-if [ `id -u` != "0" ]; then
-echo "Run this ${__FILE__} as root"
- exit -1
+if [ $# -ne 1 ]; then 
+	warning "Fleeting Bunny configuration file not available as command line argument"
+	echo "# Blank Fleeting Bunny Configuration File - AUTO CREATED" > $FLEET_BUNN_CONFIG
 else
-log "Initiating Setup script version: $VERSION as root"
-fi
-
-# check if the Fleeting Bunny config file already exists.
-# If not we will just create a blank file to avoid "File Not Found"
-# ugly error messages through out the setup process
-
-if [ ! -f $FLEET_BUNN_CONFIG ]; then
-   log "WARNING! Fleeting Bunny config file not present"
-   echo "# Blank Fleeting Bunny Configuration File - AUTO CREATED" > $FLEET_BUNN_CONFIG
+	# check if the file is a remote file that needs to be downloaded
+	if [ "${1:0:7}" == "http://" ] || [ "${1:0:8}" == "https://" ]; then
+		debug "Detected remote file specified for config. Trying to download..."
+		wget --quiet --tries=3 --output-document=input.ini "$1" 2>&1 1> /dev/null
+		if [ $? -eq 0 ]; then
+			info "Successfully downloaded the config file"
+		else
+			error "Failed to download [${1}]"
+			exit -1
+		fi
+	else
+		if [ ! -f "$1" ]; then
+			error "Config file [${1}] does not exist"
+			exit -1
+		else
+			debug "Renaming the specified config file as [input.ini]"
+			chmod +w "$1" && mv "$1" "input.ini"	
+		fi 
+	fi # end of remote file download
 fi
  
 # Log current system state
-log "System Details: `uname -a`"
-log "IP address is : `ifconfig eth0 | grep "inet " | cut -d':' -f2 | cut -d' ' -f1`"
+info "System Details: `uname -a`"
+info "IP address is : `ifconfig eth0 | grep "inet " | cut -d':' -f2 | cut -d' ' -f1`"
+
 
 # perform a quick server benchmarking to take note of various 
 # server parameters such as CPU, RAM, I/O speed etc
 
-log "Attempt to perform server benchmarking..."
-wget --quiet --tries=3 https://raw.github.com/akash-mitra/fleeting-bunny/master/utility/profile.sh
+info "Attempt to perform server benchmarking..."
+wget --quiet --tries=3 --output-document=profile.sh https://raw.github.com/akash-mitra/fleeting-bunny/master/utility/profile.sh
 if [ $? -eq 0 ]; then
 	bash profile.sh
 else
-	log "WARNING: Failed to download Profile.sh. Possible connection issue"
+	warning "Failed to download Profile.sh. Possible connection issue"
 fi
 
 # update and upgrade the server
-log "Performing yum update"
+info "Performing yum update"
 yum -y update >/dev/null
 if [ $? -eq 0 ]; then
-log "Update successful"
+info "Update successful"
 fi
-log "Attempting to upgrade server"
+info "Attempting to upgrade server"
 yum -y upgrade > /dev/null
 if [ $? -eq 0 ]; then
-log "Upgrade Successful"
+info "Upgrade Successful"
 fi
 
 # create a new staging folder to store prestine copy of products
 log "Creating setup directory"
 if [ -d $INSTALL_FOLDER ]; then
-	log "WARNING: Fleeting Bunny Install directory already exists"
+	warning "Fleeting Bunny Install directory already exists"
 else
 	 mkdir $INSTALL_FOLDER
 fi
 
 if [ $? -ne 0 ]; then
-  echo "Failed to create setup directory under /"
+  critical "Failed to create setup directory under /"
   exit -1
 fi
 
@@ -125,18 +182,18 @@ fi
 
 # download templates for different server config files
 rm -f sshd_template.sh
-log "Downloading SSH template..."
+debug "Downloading SSH template..."
 wget --quiet --tries=3 --output-document=sshd-config https://raw.github.com/akash-mitra/fleeting-bunny/master/templates/sshd-config 2>&1 1> /dev/null
 
 
 #--------------------------------------------------------
 # securing the SSH server
 #--------------------------------------------------------
-log "Strengthening the security of the SSH server..."
+info "Strengthening the security of the SSH server..."
 # SSH
 # backup the current ssh config file
 cp /etc/ssh/sshd_config $INSTALL_FOLDER
-log "Backed up sshd_config under $INSTALL_FOLDER"
+debug "Backed up sshd_config under $INSTALL_FOLDER"
 
 # We begin by changing the default configuration of the SSH server
 # By default SSH listens to Port 22 and allows password based
@@ -158,83 +215,83 @@ log "Backed up sshd_config under $INSTALL_FOLDER"
 
 SSH_PORT=$(grep SSH_PORT $FLEET_BUNN_CONFIG | cut -d'=' -f2)
 if [ "$SSH_PORT" == "" ]; then
-	log "WARNING! SSH port info not available in config file. Will prompt user"
+	warning "SSH port info not available in config file. Will prompt user"
 	echo "Default SSH Port is 22. We suggest you change it."
 	echo "Question 1: Which port would you like to run your SSH client [1024-65000]?"
 	read SSH_PORT
 fi
 sed -i "s/__PORT__/$SSH_PORT/g" $SSH_CONFIG_FILE
-log "SSH Port to be set to [$SSH_PORT]"
+info "SSH Port to be set to [$SSH_PORT]"
 
 PASS_DISABLE=$(grep PASS_DISABLE $FLEET_BUNN_CONFIG | cut -d'=' -f2)
 if [ "$PASS_DISABLE" == "" ]; then
-	log  "WARNING! SSH Password Auth info not available in config file. Will prompt user"
+	warning "SSH Password Auth info not available in config file. Will prompt user"
 	echo "We suggest you disable password authentication for other users as well."
 	echo "When you disable password, you will need key file to login"
 	echo "Question 2: Should we keep password authentication (yes / no)?"
 	read PASS_DISABLE
 fi
 sed -i "s/__PASS_AUTH__/$PASS_DISABLE/g" $SSH_CONFIG_FILE
-log "Password based login to be disabled to other users as well"
+debug "Password based login to be disabled to other users as well"
 
 GRACE_TIME=$(grep GRACE_TIME $FLEET_BUNN_CONFIG | cut -d'=' -f2)
 if [ "$GRACE_TIME" == "" ]; then
-	log "WARNING: LoginGraceTime is not available in config file. Will be defaulted to 60 seconds"
+	warning "LoginGraceTime is not available in config file. Will be defaulted to 60 seconds"
 	GRACE_TIME=60
 else 
-	log "LoginGraceTime will be set to $GRACE_TIME as per config file"
+	info "LoginGraceTime will be set to $GRACE_TIME as per config file"
 fi
 sed -i "s/__GRACE_TIME__/$GRACE_TIME/g" $SSH_CONFIG_FILE
 
-log "Root login to be permitted to the server"
+info "Root login to be permitted to the server"
 sed -i "s/__PERMIT_ROOT__/yes/g" $SSH_CONFIG_FILE
 
 
 MAX_AUTH_TRY=$(grep MAX_AUTH_TRY $FLEET_BUNN_CONFIG | cut -d'=' -f2)
 if [ "$MAX_AUTH_TRY" == "" ]; then
-	log "WARNING: MaxAuthTries is not available in config file. Will be defaulted to 4"
+	warning "MaxAuthTries is not available in config file. Will be defaulted to 4"
 	MAX_AUTH_TRY=4
 else 
-	log "MaxAuthTries will be set to $MAX_AUTH_TRY as per config file"
+	info "MaxAuthTries will be set to $MAX_AUTH_TRY as per config file"
 fi
 sed -i "s/__MAX_AUTH_TRY__/$MAX_AUTH_TRY/g" $SSH_CONFIG_FILE
 
-log "Max session count to be set to 6" 
+debug "Max session count to be set to 6" 
 sed -i "s/__MAX_SESSION_COUNT__/6/g" $SSH_CONFIG_FILE
 
-log "X11Forwarding is to be set to 'yes' (Specifies whether X11 forwarding is permitted)"
+debug "X11Forwarding is to be set to 'yes' (Specifies whether X11 forwarding is permitted)"
 sed -i "s/__X11_FORWARD__/yes/g" $SSH_CONFIG_FILE
 
-log "ClientAliveInterval to be set to 120 sec. (This will give you 6 minutes of inactivity time)"
+debug "ClientAliveInterval to be set to 120 sec. (This will give you 6 minutes of inactivity time)"
 sed -i "s/__CLIENT_ALIVE__/120/g" $SSH_CONFIG_FILE
 
 BANNER_TEXT="This is a restricted system. Only explicitely authorized personnel are allowed to login"
 echo $BANNER_TEXT > /etc/ssh/banner.text
-log "Banner text is to be set"
+info "Banner text is to be set"
 sed -i "s~__BANNER__~/etc/ssh/banner.text~g" $SSH_CONFIG_FILE
 
-log "Replacing original SSHD_Config with the newly prepared one..."
+info "Replacing original SSHD_Config with the newly prepared one..."
 cp $SSH_CONFIG_FILE /etc/ssh/sshd_config
 
 # restart SSH
-log "Attempting to restart SSH server..."
+debug "Attempting to restart SSH server..."
 service sshd restart
 
 if [ $? -eq 0 ]; then
-	log "... SSH server restarted"
+	info "SSH server restarted"
 else
 
 	# ssh config change failed. Rollback the changes
 	# replace the previously backed up sshd_config
-	log "FATAL ERROR: SSHD failed to restart. Attempting rollback" 
-	log "INFO: In case rollback fails and we lose ssh access, please use VNC"
+	error "SSHD failed to restart. Attempting rollback" 
+	info "In case rollback fails and we lose ssh access, please use VNC Terminal"
 	cp $INSTALL_FOLDER/sshd_config /etc/ssh/
 	# attempt to restart the server once again
 	service sshd restart
 	# abort the mission
 	exit -1
 fi
-echo "SSH Server is updated. SSH port set to $SSH_PORT. Remember to login using keyfile next time!"
+info "SSH Server is updated. SSH port set to $SSH_PORT. Remember to login using keyfile next time!"
 
 #--------------------------------------------------------
 #        INSTALLING WEB SERVER
@@ -243,12 +300,12 @@ echo "SSH Server is updated. SSH port set to $SSH_PORT. Remember to login using 
 # we will use yum command. To avoid interaction, we will use -y consenting switch
 # If apache is already present, this command will do nothing
 
-log "Install Apache webserver..."
+debug "Starting to install Apache webserver..."
 yum -y install httpd 
 if [ $? -eq 0 ]; then
- log "Apache installed"
+ info "Apache installed"
 else
- log "Apache installation failed"
+ critical "Apache installation failed"
  exit -1 
 fi
 
@@ -257,36 +314,42 @@ fi
 # fleeting bunny configuration file. In case, we fail to determine this
 # we will prompt the user for input
 
-log "Trying to determine primary website name"
+debug "Trying to determine primary website name"
 SITENAME=$(grep SITENAME $FLEET_BUNN_CONFIG | cut -d'=' -f2)
 if [ "$SITENAME" == "" ]; then
-	log "WARNING: Primary site name not found in fleeting bunny config. Prompting for input"
+	warning "Primary site name not found in fleeting bunny config. Prompting for input"
 	echo "In the following step we configure Apache Webserver as a virtual host"
 	echo "Please specify your primary website name (e.g. example.com):"
 	read SITENAME
 fi
-log "Primary site name determined as $SITENAME"
+info "Primary site name determined as $SITENAME"
 
 # In this step, we will create the directory structure required to store our websites
 # we will also grant necessary permissions to apache user
 # If any given website found to be existing, we will prompt user for overwrite
 
-log "Creating document root"
+info "Creating document root"
 if [ -d "/var/www/$SITENAME" ]; then
-	echo "The directory already exists. Overwrite it? (y/n)"
-	read ANSWER;
+	warning "web directory [/var/www/${SITENAME}] already exists"
+	SILENT_OVERWRITE=$(getConfigValue "SILENT_OVERWRITE")
+	if [ "$SILENT_OVERWRITE" -eq "1" ] || [ "$SILENT_OVERWRITE" == "y" ] || [ "$SILENT_OVERWRITE" == "Y" ] || [ "$SILENT_OVERWRITE" == "yes" ]; then
+		ANSWER="y"
+	else
+		echo "The directory already exists. Overwrite it? (y/n)"
+		read ANSWER;
+	fi
 	if [ "$ANSWER" == "y" ]; then
-		log "Specified directory exists, removing the same"
+		info "Specified directory exists, removing the same"
 		rm -rf /var/www/$SITENAME
 	else 
-		log "Exiting the process as the directory already exists"
+		critical "Exiting the process as the directory already exists"
 		exit -1
 	fi
 fi
 WEB_ROOT="/var/www/$SITENAME/public_html"
 mkdir -p $WEB_ROOT
 if [ $? -ne 0 ]; then
- log "Could not create directory $WEB_ROOT" 
+ critical "Could not create directory $WEB_ROOT" 
  exit -1 
 fi
 log "Creating other directories for logging, backup etc."
@@ -296,7 +359,7 @@ mkdir -p /var/www/$SITENAME/backup
 log "Granting ownership of web directories to www user"
 chown -R apache:apache $WEB_ROOT
 if [ $? -ne 0 ]; then
- log "chown failed to change permission" 
+ critical "chown failed to change permission" 
  exit -1 
 fi
 log "Granting ownership of log directories to www user"
@@ -316,7 +379,7 @@ chmod 700 /var/www/$SITENAME/backup
 # ports, host details (that is the website details), and some security and performance
 # configurations.
 
-log "Starting Apache Configuration.."
+info "Starting Apache Configuration.."
 
 # The apache configuration is stored typically in httpd.conf file. The location of
 # this configuration file can be varied depending on the system. In the following
@@ -326,23 +389,23 @@ log "Starting Apache Configuration.."
 # (For more please refer to httpd man pages)
 # To do this, however, we will need to first determine the apache binary location
 
-log "Determine httpd binary location.."
+debug "Determine httpd binary location.."
 APACHE_LOC=$(whereis -b httpd | cut -d' ' -f2)
-log "httpd located at $APACHE_LOC"
-log "Querying apache bin to determine Apache root location"
+debug "httpd located at $APACHE_LOC"
+debug "Querying apache bin to determine Apache root location"
 APACHE_ROOT_LOC=$($APACHE_LOC -V | grep HTTPD_ROOT | cut -d'"' -f2)
-log "Querying apache bin to determine Apache conf file location"
+debug "Querying apache bin to determine Apache conf file location"
 APACHE_CONFIG_LOC=$($APACHE_LOC -V | grep SERVER_CONFIG_FILE | cut -d'"' -f2)
 APACHE_CONFIG_LOC="${APACHE_ROOT_LOC}/${APACHE_CONFIG_LOC}"
-log "Config file is determined to be located at $APACHE_CONFIG_LOC"
+info "Apache Config file is determined to be located at $APACHE_CONFIG_LOC"
 
 # Now, before we start making any modification to the apache config file,
 # it is good idea to take a backup of this file. If anything goes wrong, we can rollback
 
-log "Backing up config file"
+debug "Backing up config file"
 cp $APACHE_CONFIG_LOC $INSTALL_FOLDER
 if [ $? -ne 0 ]; then
-	log "Failed to backup Apache Config. Exiting"
+	critical "Failed to backup Apache Config. Exiting"
 	exit -1
 fi
 
@@ -371,8 +434,9 @@ fi
 # As always, we first search in Fleeting Bunny config, if not available, we prompt user
 
 APACHE_PORT=$(grep APACHE_PORT $FLEET_BUNN_CONFIG | cut -d'=' -f2)
+SECURE_APACHE_PORT=443  # TODO
 if [ "$APACHE_PORT" == "" ]; then
-	log "Apache Port value missing in config file. Prompting for user input"
+	debug "Apache Port value missing in config file. Prompting for user input"
 	echo "By Default webservers execute at port 80. You may want to change this"
 	echo "Please enter new port number. Just enter to retain default value"
 	read APACHE_PORT
@@ -380,10 +444,10 @@ if [ "$APACHE_PORT" == "" ]; then
 		APACHE_PORT="80"
 	fi
 fi
-log "Setting Listener port to $APACHE_PORT"
+info "Setting Listener port to $APACHE_PORT"
 sed -i "s/^Listen .*/Listen $APACHE_PORT/" $APACHE_CONFIG_LOC
 if [ $? -ne 0 ]; then
-	log "Failed to modify PORT in Apache Config. Exiting"
+	critical "Failed to modify PORT in Apache Config. Exiting"
 	exit -1
 fi
 
@@ -392,17 +456,17 @@ fi
 # We are setting the server as virtual host as in the future we might want to host
 # multiple websites from the same server
 
-log "Setting up virtual host"
+info "Setting up virtual host"
 sed -i "s/^#NameVirtualHost .*/NameVirtualHost *:80/" $APACHE_CONFIG_LOC
 if [ $? -ne 0 ]; then
-	log "Failed to uncomment NameVirtualHost in Apache Config. Exiting"
-	exit -1
+	critical "Failed to uncomment NameVirtualHost in Apache Config. Exiting"
+	error -1
 fi
 
 log "Downloading the virtual host configuration template..."
 wget --quiet --tries=3 --output-document=virtual_template.sh https://raw.github.com/akash-mitra/fleeting-bunny/master/templates/apache-vhost
 if [ $? -ne 0 ]; then
-	log "Failed to download virtual host template. Using default configuration"
+	debug "Failed to download virtual host template. Using default configuration"
 	
 	echo "# Following lines are added by Fleeting Bunny" > virtual_template.sh
 	echo "# This is a static configuration!" >> virtual_template.sh
@@ -423,30 +487,30 @@ fi
 log "Setting up mandatory configuration values in template"
 sed -i "s/__SERVER_ADMIN__/webmaster@${SITENAME}/" virtual_template.sh
 if [ $? -ne 0 ]; then
-	echo "Failed to setup server admin. Exiting"
+	critical "Failed to setup server admin. Exiting"
 	exit -1
 fi
 sed -i "s~__DOCUMENT_ROOT__~/var/www/$SITENAME/public_html~" virtual_template.sh
 if [ $? -ne 0 ]; then
-	echo "Failed to setup document root. Exiting"
+	critical "Failed to setup document root. Exiting"
 	exit -1
 fi
 sed -i "s/__SERVER_NAME__/www.$SITENAME/" virtual_template.sh
 if [ $? -ne 0 ]; then
-	echo "Failed to setup server name. Exiting"
+	critical "Failed to setup server name. Exiting"
 	exit -1
 fi
 sed -i "s~__ERROR_LOG__~/var/www/$SITENAME/log/error~" virtual_template.sh
 if [ $? -ne 0 ]; then
-	echo "Failed to setup error log. Exiting"
+	critical "Failed to setup error log. Exiting"
 	exit -1
 fi
 sed -i "s~__CUSTOM_LOG__~/var/www/$SITENAME/log/access~" virtual_template.sh
 if [ $? -ne 0 ]; then
-	echo "Failed to setup access log. Exiting"
+	critical "Failed to setup access log. Exiting"
 	exit -1
 fi
-log "adding the configured virtual host to apache config"
+debug "adding the configured virtual host to apache config"
 cat virtual_template.sh >> $APACHE_CONFIG_LOC
 
 
@@ -454,12 +518,12 @@ cat virtual_template.sh >> $APACHE_CONFIG_LOC
 # server. We will restart apache to check if everything is alright.
 # In case of failure, we will rollback the changes
 
-log "stopping all apache processes"
+debug "stopping all apache processes"
 apachectl -k stop
-log "starting apache again..."
+debug "starting apache again..."
 /etc/init.d/httpd start
 if [ $? -ne 0 ]; then
-    log "FATAL ERROR: Apache failed to restart. Attempting to re-instate server config"
+    error "Apache failed to restart. Attempting to re-instate server config"
     cp $APACHE_CONFIG_LOC $INSTALL_FOLDER/httpd.conf.debug
     cp $INSTALL_FOLDER/httpd.conf $APACHE_CONFIG_LOC
     log "A copy of current apache conf is stored in $INSTALL_FOLDER for debug purpose"
@@ -467,7 +531,7 @@ if [ $? -ne 0 ]; then
 	/etc/init.d/httpd start
 	exit -1
 else
-	log "Apache server restarted successfully with virtual hosting environment"
+	info "Apache server restarted successfully with virtual hosting environment"
 	cp $APACHE_CONFIG_LOC $INSTALL_FOLDER/httpd.conf.custom
 	
 	log "Adding entry in chkconfig so that apache run automatically when the server boots"
@@ -488,20 +552,20 @@ echo "<h1>Fleeting Bunny</h1><hr />Hostname: `hostname`</body></html>" >> ${WEB_
 
 FINE_TUNE_APACHE=$(grep FINE_TUNE_APACHE $FLEET_BUNN_CONFIG | cut -d'=' -f2)
 if [ "$FINE_TUNE_APACHE" != "0" ]; then
-	log "Fine Tuning Apache Web server..."
+	info "Fine Tuning Apache Web server..."
 	
 	# Hide Apache Server Signature
-	log "Switching off Server Signature"
+	debug "Switching off Server Signature"
 	sed -i 's/^ServerSignature .*/ServerSignature Off/' $APACHE_CONFIG_LOC
 	if [ $? -ne 0 ]; then
-		log "WARNING: Failed to change Apache directive: ServerSignature"
+		warning "Failed to change Apache directive: ServerSignature"
 	fi
 	
 	# Change ServerToken 
-	log "Switching off Server Token"
+	debug "Switching off Server Token"
 	sed -i 's/^ServerTokens .*/ServerTokens ProductOnly/' $APACHE_CONFIG_LOC
 	if [ $? -ne 0 ]; then
-		log "WARNING: Failed to change Apache directive: ServerToken"
+		warning "Failed to change Apache directive: ServerToken"
 	fi
 	
 	# TODO: server pool size regulation optimization 
@@ -511,40 +575,41 @@ log "Apache optimization done. Restarting"
 apachectl -k stop
 /etc/init.d/httpd start
 if [ $? -ne 0 ]; then
-	log "Error: Could not restart Apache after optimization. Rolling back to previous state"
+	warning "Could not restart Apache after optimization. Rolling back to previous state"
 	cp $APACHE_CONFIG_LOC $INSTALL_FOLDER/httpd.conf.debug
 	cp $INSTALL_FOLDER/httpd.conf.custom $APACHE_CONFIG_LOC
-	log "Rollback complete"
-	log "A copy of current apache conf is stored in $INSTALL_FOLDER for debug purpose"
-	log "Attempting restart again"
+	info "Rollback complete"
+	debug "A copy of current apache conf is stored in $INSTALL_FOLDER for debug purpose"
+	debug "Attempting restart again"
 	/etc/init.d/httpd start
 	if [ $? -ne 0 ]; then
-		log "FATAL ERROR: Recurrent error. Exiting"
+		error "Recurrent error. Exiting"
 		exit -1
 	fi
 fi
-log "Apache restarted successfully"
-	
+info "Apache restarted successfully"
+APACHE_INSTALLED=1
 
 #--------------------------------------------------------
 #        INSTALL PHP
 #--------------------------------------------------------
 
-log "Checking directive for PHP installation"
+debug "Checking directive for PHP installation"
 INSTALL_PHP=$(grep INSTALL_PHP $FLEET_BUNN_CONFIG | cut -d'=' -f2)
 if [ "$INSTALL_PHP" == "" ]; then
-	log "No explicit directive about PHP installation in config file. Will prompt"
+	info "No explicit directive about PHP installation in config file. Will prompt"
 	echo "Do you want to install PHP? (y / N)"
 	read INSTALL_PHP
 fi
 if [ "$INSTALL_PHP" == "1" ] || [ "$INSTALL_PHP" == "y" ] || [ "$INSTALL_PHP" == "Y" ]; then
-	log "starting PHP installation"
+	debug "starting PHP installation"
 	yum -y install php php-mysql > /dev/null
 	if [ $? -ne 0 ]; then
-		log "FATAL ERROR: Failed to install PHP or PHP-MYSQL"
+		critical "Failed to install PHP or PHP-MYSQL"
 		exit -1
 	else
-		log "`php --version | head -1` installed successfully" 
+		info "`php --version | head -1` installed successfully" 
+		PHP_INSTALLED=1
 	fi
 	
 	# TODO: PHP Hardening:
@@ -567,17 +632,17 @@ if [ "$INSTALL_PHP" == "1" ] || [ "$INSTALL_PHP" == "y" ] || [ "$INSTALL_PHP" ==
 	# management system. For example, CMS like Joomla or WordPress may require 
 	# certain other PHP module or certain changes in php.ini
 	
-	log "Determining the location of php.ini file from php_ini_loaded_file()"
-	log "Downloading php-ini"
+	debug "Determining the location of php.ini file from php_ini_loaded_file()"
+	debug "Downloading php-ini"
 	wget --quiet --tries=3 --output-document=php-ini.php https://raw.github.com/akash-mitra/fleeting-bunny/master/utility/php-ini 2>&1 1> /dev/null
 	if [ $? -eq 0 ]; then
 		PHP_CONFIG_LOC=`php php-ini.php`
 	else
-		log "WARNING: Failed to download php-ini.php. Possible connection issue"
-		log "Checking php.ini in the default location"
+		warning "Failed to download php-ini.php. Possible connection issue"
+		debug "Checking php.ini in the default location"
 		PHP_CONFIG_LOC="/etc/php.ini"
 	fi
-	log "php.ini located at $PHP_CONFIG_LOC"
+	debug "php.ini located at $PHP_CONFIG_LOC"
 	
 	
 	# configuring PHP memory limit
@@ -586,13 +651,13 @@ if [ "$INSTALL_PHP" == "1" ] || [ "$INSTALL_PHP" == "y" ] || [ "$INSTALL_PHP" ==
 	
 	PHP_MEMORY_LIMIT=$(grep PHP_MEMORY_LIMIT $FLEET_BUNN_CONFIG | cut -d'=' -f2)
 	if [ "$PHP_MEMORY_LIMIT" == "" ]; then
-		log "No PHP memory limit override found. Default value will be retained"
+		debug "No PHP memory limit override found. Default value will be retained"
 	else
 		sed -i "s~^memory_limit .*$~memory_limit = ${PHP_MEMORY_LIMIT}~" $PHP_CONFIG_LOC
 		if [ $? -eq 0 ]; then
-			log "PHP memory limit is to be set to [${PHP_MEMORY_LIMIT}]"
+			info "PHP memory limit is to be set to [${PHP_MEMORY_LIMIT}]"
 		else
-			log "ERROR: Error changing PHP memory limit to [${PHP_MEMORY_LIMIT}]"
+			error "Error changing PHP memory limit to [${PHP_MEMORY_LIMIT}]"
 		fi
 	fi
 	
@@ -604,13 +669,14 @@ if [ "$INSTALL_PHP" == "1" ] || [ "$INSTALL_PHP" == "y" ] || [ "$INSTALL_PHP" ==
 	
 	CMS=$(grep CMS $FLEET_BUNN_CONFIG | cut -d'=' -f2)
 	if [ "$CMS" == "joomla" ] || [ "$CMS" == "Joomla" ] || [ "$CMS" == "JOOMLA" ]; then
-		log "Joomla is scheduled to be installed as CMS. Checking additional packages for Joomla"
+		info "Joomla is scheduled to be installed as CMS. Checking additional PHP packages for Joomla"
 		
 		# Magic Quote GPC changes
 		# TODO
 	fi
+	
 else
-	log "WARNING: Skipping PHP Installation"
+	warning "Skipping PHP Installation"
 fi
 
 
@@ -618,15 +684,15 @@ fi
 #       INSTALL MySQL
 # --------------------------------------------------------
 
-log "Checking directive for MySQL database installation"
+debug "Checking directive for MySQL database installation"
 INSTALL_MYSQL=$(grep INSTALL_MYSQL $FLEET_BUNN_CONFIG | cut -d'=' -f2)
 if [ "$INSTALL_MYSQL" == "" ]; then
-	log "No explicit directive about MySQL installation in config file. Will prompt"
+	debug "No explicit directive about MySQL installation in config file. Will prompt"
 	echo "Do you want to install MySQL database? (y / N)"
 	read INSTALL_MYSQL
 fi
 if [ "$INSTALL_MYSQL" == "1" ] || [ "$INSTALL_MYSQL" == "y" ] || [ "$INSTALL_MYSQL" == "Y" ]; then
-	log "Starting MySQL database installation"
+	debug "Starting MySQL database installation"
 	
 	# The Database can be installed in the same machine or in some other machine
 	# Depending on the value of the parameter LOCAL_DATABASE, installation location
@@ -638,27 +704,27 @@ if [ "$INSTALL_MYSQL" == "1" ] || [ "$INSTALL_MYSQL" == "y" ] || [ "$INSTALL_MYS
 	LOCAL_DATABASE=$(grep LOCAL_DATABASE $FLEET_BUNN_CONFIG | cut -d'=' -f2)
 	if [ "$LOCAL_DATABASE" == "0" ]; then
 		# Remote database installation
-		log "The database will be installed in remote machine"
+		info "The database will be installed in remote machine"
 		# TODO
 	else # local installation
-		log "The database will be installed in the local machine"
+		info "The database will be installed in the local machine"
 		yum -y install mysql-server mysql-client
 		
 		if [ $? -ne 0 ]; then
-			log "FATAL ERROR: Failed to install MYSQL Server and Client"
+			critical "Failed to install MYSQL Server and Client"
 			exit -1
 		else
-			log "`mysql -h localhost -V` installed successfully" 
+			info "`mysql -h localhost -V` installed successfully" 
 		fi
 		
-		log "Attempting to start MySQL"
+		debug "Attempting to start MySQL"
 		service mysqld start
 		if [ $? -ne 0 ]; then
-			log "FATAL ERROR: Failed to start MySQL Server"
+			critical "Failed to start MySQL Server"
 			exit -1
 		else
-			log "MySQL started successfully" 
-			log "Adding entry to chkconfig so that mysql starts automatically at server startup"
+			info "MySQL started successfully" 
+			debug "Adding entry to chkconfig so that mysql starts automatically at server startup"
 			/sbin/chkconfig --levels 235 mysqld on
 		fi
 		
@@ -718,10 +784,10 @@ if [ "$INSTALL_MYSQL" == "1" ] || [ "$INSTALL_MYSQL" == "y" ] || [ "$INSTALL_MYS
 		cat $MYSQL_TMPFILE | mysql -u root
 		
 		if [ $? -ne 0 ]; then
-			log "WARNING: SQL execution error"
+			warning "SQL execution error while configuring MySQL database"
 		else
-			log "MySQL configuration done"
-			# rm $MYSQL_TMPFILE
+			info "MySQL configuration done"
+			rm $MYSQL_TMPFILE
 		fi
 		
 		# 
@@ -733,41 +799,146 @@ if [ "$INSTALL_MYSQL" == "1" ] || [ "$INSTALL_MYSQL" == "y" ] || [ "$INSTALL_MYS
 		# good place to start is MySQL tuning primer code available at
 		# https://launchpadlibrarian.net/78745738/tuning-primer.sh
 		#
-		log "Taking back-up of my.cnf"
+		debug "Taking back-up of my.cnf"
 		cp $MYSQL_CONFIG_LOC $INSTALL_FOLDER
 		if [ $? -ne 0 ]; then
-			log "Failed to backup MySQL Config. Exiting"
+			critical "Failed to backup MySQL Config. Exiting"
 			exit -1
 		fi
 		
-		log "Modifying my.cnf file with recommended values for 1GB node"
-		log "Downloading MySQL config file template..."
+		info "Modifying my.cnf file with recommended values for 1GB node"
+		debug "Downloading MySQL config file template..."
 		
 		wget --quiet --tries=3 --output-document=my.cnf https://raw.github.com/akash-mitra/fleeting-bunny/master/templates/mysql-config-1gb
 		if [ $? -eq 0 ]; then
-			log "Replacing $MYSQL_CONFIG_LOC with downloaded my.cnf"
+			debug "Replacing $MYSQL_CONFIG_LOC with downloaded my.cnf"
 			cp ./my.cnf $MYSQL_CONFIG_LOC
 		else
-			log "WARNING: Failed to download MySQL Config file. Possible connection issue"
+			warning "Failed to download MySQL Config file. Possible connection issue"
 		fi
 		
-		log "Attempting MySQL database restart"
+		debug "Attempting MySQL database restart"
 		service mysqld restart
 		if [ $? -ne 0 ]; then
-			log "WARNING: Server failed to start"
-			log "Restoring default my.cnf"
+			warning "Server failed to start"
+			debug "Restoring default my.cnf"
 			cp ${INSTALL_FOLDER}/my.cnf ${MYSQL_CONFIG_LOC}
-			log "Attempting MySQL database restart (2nd time)"
+			debug "Attempting MySQL database restart (2nd time)"
 			service mysqld restart
 			if [ $? -ne 0 ]; then
-				log "FATAL ERROR: MySQL failed to restart. Exiting"
+				critical "MySQL failed to restart. Exiting"
 				exit -1
 			fi
 		fi
 		
-		log "MySQL database restarted successfully"
-		
+		info "MySQL database restarted successfully"
+		DB_INSTALLED=1
 	fi # end of local install
 else
-	log "WARNING: Skipping MySQL Installation"
+	warning "Skipping MySQL Installation"
 fi
+
+
+# --------------------------------------------------------
+#        ACTIVATE FIREWALL
+# --------------------------------------------------------
+# TODO
+# Below section is pretty primitive. Two more major functionalities
+# namely, packet logging and kernel tweaking needs to be added in
+# this section, along with common port scanning blocking rules.
+# One reference is: Easyfwgen
+
+info "Starting Firewall configuration"
+
+# At this point, we will install and activate iptables firewall 
+# in the system provided the same is not already installed
+
+debug "Checking if iptables firewall is already installed"
+rpm -q iptables >> /dev/null
+if [ $? -ne 0 ]; then
+	warning "Firewall not installed by default. Need to run installation"
+	debug "Installing Iptables Firewall"
+	yum -y install iptables
+	if [ $? -eq 0 ]; then
+		info "Iptables installed successfully"
+		
+		# TODO: Auto detect iptables location instead of hard-coding
+		IPT="/sbin/iptables"
+		IPTS="/sbin/iptables-save"
+		IPTR="/sbin/iptables-restore"
+		
+	else 
+		critical "Failed to install iptables. Exiting"
+		exit -1
+	fi
+fi
+
+# Flush old rules, old custom tables if any
+debug "Flushing existing rule, if any"
+$IPT --flush
+$IPT --delete-chain
+
+# we will set a default policy to DROP all packets and then add rules to specifically 
+# allow (ACCEPT) packets that may be from trusted IP addresses, or for certain ports 
+# on which we have services running such as, HTTP, SSH etc.
+
+# Before applying our rules, we will temporary store all our rules in a rule file and
+# later finally add the rules in Firewall
+debug "Generating Firewall Rule file"
+$IPTS > firewall.rule
+
+# we will start by creating the default rule for all the chains
+# We will be blocking all the incoming packets by default
+# However, we will allow all the outgoing packets by default
+debug "Setting Firewall default: Drop all incoming packets unless explicitly allowed"
+echo "-P INPUT DROP" >> firewall.rule
+echo "-P OUTPUT ACCEPT" >> firewall.rule
+
+# Allow any packets in our loopback interface (127.0.0.1)
+debug "Accept packets in loopback interface"
+echo "-A INPUT -i lo -j ACCEPT" >> firewall.rule
+
+# All TCP sessions should begin with SYN
+echo "-A INPUT -p tcp ! --syn -m state --state NEW -s 0.0.0.0/0 -j DROP" >> firewall.rule
+
+# Allow established session to receive traffic
+echo "-A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT" >> firewall.rule
+
+# Web Traffic
+if [ $APACHE_INSTALLED -eq 1 ]; then
+
+	info "Opening firewall port [$APACHE_PORT] for HTTP traffic"
+	# Allow HTTP connection on tcp port $APACHE_PORT determined above
+	echo "-A INPUT -p tcp --dport $APACHE_PORT -m state --state NEW -s 0.0.0.0/0 -j ACCEPT" >> firewall.rule
+
+	info "Opening firewall port [$SECURE_APACHE_PORT] for HTTPS traffic"
+	# Allow HTTPS connection on tcp port $SECURE_APACHE_PORT determined above
+	echo "-A INPUT -p tcp --dport $SECURE_APACHE_PORT -m state --state NEW -s 0.0.0.0/0 -j ACCEPT" >> firewall.rule
+fi
+
+# Allow SSH connections on tcp port $SSH_PORT determined before
+info "Opening firewall port [$SSH_PORT] for SSH traffic"
+echo "-A INPUT -p tcp --dport $SSH_PORT -m state --state NEW -s 0.0.0.0/0 -j ACCEPT" >> firewall.rule
+
+# Accept inbound ICMP messages
+debug "Limiting ping to 2 packets per second"
+echo "-A PACKET -p icmp -m icmp --icmp-type 8 -m limit --limit 2/sec -j ACCEPT" >> firewall.rule
+
+# And if the server is not acting as a router, we drop all the FORWARD packets
+PACKET_FORWARDING=$(getConfigValue "PACKET_FORWARDING")
+if [ "$PACKET_FORWARDING" != "1" ]; then 
+	debug "By default, drop all forward packets"
+	echo "-P FORWARD DROP" >> firewall.rule
+fi
+
+# Next, we are going to block all the other traffics to our server.
+# The rules in iptables firewall are parsed from top to bottom.
+# once a rule is matched against an incoming connection and 
+# relevant action is taken, following rules does not affect it. 
+# As our rules for allowing ssh and web traffic come first, as long as our 
+# rule to block all traffic comes after them, we can still accept the traffic we want.
+
+echo "-A INPUT -j DROP" >> firewall.rule
+
+# now apply these rules 
+$IPTR < firewall.rule
