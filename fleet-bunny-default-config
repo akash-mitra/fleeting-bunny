@@ -6,4 +6,5 @@ APACHE_PORT=8080
 FINE_TUNE_APACHE=1
 INSTALL_PHP=1
 INSTALL_MYSQL=1
+CMS=Joomla
 CMS_CONTENT_LOC=http://joomlacode.org/gf/download/frsrelease/19007/134333/Joomla_3.2.1-Stable-Full_Package.zip
