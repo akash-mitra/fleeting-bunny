@@ -89,6 +89,15 @@ else
 	info "Initiating Setup script version: $VERSION as root"
 fi
 
+# check and download wget
+# I prefer to use wget over curl as wget can be typed in using only left hand in QWERTY keyboard ;-)
+rpm -q wget > /dev/null
+if [ $? -ne 0 ]; then
+        debug "Installing wget"
+        yum -y install wget > /dev/null
+        info "wget installation done"
+fi
+
 # show a front screen 
 clear
 echo "----------------------------------------------------------------------"
@@ -457,7 +466,7 @@ fi
 # multiple websites from the same server
 
 info "Setting up virtual host"
-sed -i "s/^#NameVirtualHost .*/NameVirtualHost *:80/" $APACHE_CONFIG_LOC
+sed -i "s/^#NameVirtualHost .*/NameVirtualHost *:${APACHE_PORT}/" $APACHE_CONFIG_LOC
 if [ $? -ne 0 ]; then
 	critical "Failed to uncomment NameVirtualHost in Apache Config. Exiting"
 	error -1
@@ -470,7 +479,7 @@ if [ $? -ne 0 ]; then
 	
 	echo "# Following lines are added by Fleeting Bunny" > virtual_template.sh
 	echo "# This is a static configuration!" >> virtual_template.sh
-	echo "<VirtualHost *:80>" >> virtual_template.sh
+	echo "<VirtualHost *:${APACHE_PORT}>" >> virtual_template.sh
     echo "ServerAdmin __SERVER_ADMIN__" >> virtual_template.sh
     echo "DocumentRoot __DOCUMENT_ROOT__" >> virtual_template.sh
     echo "ServerName __SERVER_NAME__" >> virtual_template.sh
@@ -485,6 +494,11 @@ fi
 # template to actual config file.
 
 log "Setting up mandatory configuration values in template"
+sed -i "s/__APACHE_PORT__/@${APACHE_PORT}/" virtual_template.sh
+if [ $? -ne 0 ]; then
+	critical "Failed to setup virtual server port. Exiting"
+	exit -1
+fi
 sed -i "s/__SERVER_ADMIN__/webmaster@${SITENAME}/" virtual_template.sh
 if [ $? -ne 0 ]; then
 	critical "Failed to setup server admin. Exiting"
