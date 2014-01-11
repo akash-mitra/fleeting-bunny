@@ -494,7 +494,7 @@ fi
 # template to actual config file.
 
 log "Setting up mandatory configuration values in template"
-sed -i "s/__APACHE_PORT__/@${APACHE_PORT}/" virtual_template.sh
+sed -i "s/__APACHE_PORT__/${APACHE_PORT}/" virtual_template.sh
 if [ $? -ne 0 ]; then
 	critical "Failed to setup virtual server port. Exiting"
 	exit -1
