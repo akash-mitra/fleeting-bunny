@@ -24,8 +24,9 @@
 # 0.1  | 29 Dec 2013 | Beta - full AMP capability 
 # 0.2  | 04 Jan 2014 | Using some parts from kvz.io Bash3 Boilerplate
 # 0.4  | 06 Jan 2014 | Added basic firewall rules
+# 0.5  | 14 Jan 2014 | Bug fixes 1, 2, 8, 9
 #--------------------------------------------------------------------------
-VERSION="0.4"
+VERSION="0.5"
 
 set -o pipefail
 
@@ -121,6 +122,7 @@ FLEET_BUNN_CONFIG="${INSTALL_FOLDER}input.ini"
 SSH_CONFIG_FILE="${INSTALL_FOLDER}sshd-config"
 INSTALL_INFO="${INSTALL_FOLDER}info.txt"
 FIREWALL_RULE_FILE="${INSTALL_FOLDER}firewall.rule"
+FASTCGI=1 
 
 # check if root, if not get out
 if [ `id -u` != "0" ]; then
@@ -184,6 +186,10 @@ else
 		fi 
 	fi # end of remote file download
 fi
+
+debug "Determining setup directives from config file"
+SILENT_OVERWRITE=$(getConfigValue "SILENT_OVERWRITE")
+INSTALL_PHP=$(grep INSTALL_PHP $FLEET_BUNN_CONFIG | cut -d'=' -f2)
  
 # Log current system state
 info "System Details: `uname -a`"
@@ -337,294 +343,381 @@ gather "SSH is configured to listen on port $SSH_PORT"
 #        INSTALLING WEB SERVER
 #--------------------------------------------------------
 # Apache webserver installation starts
-# we will use yum command. To avoid interaction, we will use -y consenting switch
-# If apache is already present, this command will do nothing
 
-debug "Starting to install Apache webserver..."
-Install_If_Missing "httpd"
+debug "Checking directive for Apache installation"
+INSTALL_APACHE=$(grep INSTALL_APACHE $FLEET_BUNN_CONFIG | cut -d'=' -f2)
+if [ "$INSTALL_APACHE" == "1" ] || [ "$INSTALL_APACHE" == "Y" ] || [ "$INSTALL_APACHE" == "y" ]; then
+   
+   debug "Starting to install Apache webserver..."
+   Install_If_Missing "httpd"
+   
+   
+   # In this step, we will try to determine our primary website name from
+   # fleeting bunny configuration file. In case, we fail to determine this
+   # we will prompt the user for input
+   
+   debug "Trying to determine primary website name"
+   SITENAME=$(getConfigValue "SITENAME")
+   if [ "$SITENAME" == "" ]; then
+   	warning "Primary site name not found in fleeting bunny config. Prompting for input"
+   	echo "In the following step we configure Apache Webserver as a virtual host"
+   	echo "Please specify your primary website name (e.g. example.com):"
+   	read SITENAME
+   fi
+   info "Primary site name determined as $SITENAME"
+   
+   debug "Trying to determine primary website user"
+   SITEUSER=$(getConfigValue "SITEUSER")
+   if [ "$SITEUSER" == "" ]; then
+   	warning "Primary site username not found in fleeting bunny config. Defaulting"
+   	SITEUSER="user_"${SITENAME:0:4}
+   fi
+   info "Primary site username determined as $SITEUSER"
+   
+   # In this step, we will create the directory structure required to store our websites
+   # Our directory structure will be in the following format
+   # 
+   # Directory                       Owner        Permission   Comment
+   # ----------------------------------------------------------------------------------
+   # /var/www                        root         700          Stored under HTTPROOT 
+   # /var/www/site                   user         700          Home directory of the user
+   # /var/www/site/logs              user         700          Stores all logs
+   # /var/www/site/html              user         700          Actual website files
+   # /var/www/site/cgi-bin           user         700          For CGI implementation
+   # 
+   # We will first create a skeleton structure for creating these directories
+   # Next we will add a new user with the created skeleton
+   # If the directory structure found to be existing, we will prompt user for overwrite
+   
+   HTTPROOT="/var/www"
+   info "Creating document root"
+   if [ -d "${HTTPROOT}/${SITENAME}" ]; then
+   	warning "web directory [${HTTPROOT}/${SITENAME}] already exists"
+   	
+   	if [ "$SILENT_OVERWRITE" -eq "1" ] || [ "$SILENT_OVERWRITE" == "y" ] || [ "$SILENT_OVERWRITE" == "Y" ] || [ "$SILENT_OVERWRITE" == "yes" ]; then
+   		ANSWER="y"
+   	else
+   		echo "The directory already exists. Overwrite it? (y/n)"
+   		read ANSWER;
+   	fi
+   	if [ "$ANSWER" == "y" ]; then
+   		info "Specified directory exists, removing the same"
+   		rm -rf "${HTTPROOT}/${SITENAME}"
+   	else 
+   		critical "Exiting the process as the directory already exists"
+   		exit -1
+   	fi
+   fi
+   
+   # create the skeleton
+   debug "Creating skeleton structure in /opt"
+   cd /opt
+   mkdir -p skel/logs || critical "Can not create /opt/skel/logs"
+   mkdir skel/html    || critical "Can not create /opt/skel/html"
+   mkdir skel/cgi-bin || critical "Can not create /opt/skel/cgi-bin"
+   
+   # if PHP is to be used, download cgi handler for FASTCGI
+   if [ "$INSTALL_PHP" == "1" ] || [ "$INSTALL_PHP" == "y" ] || [ "$INSTALL_PHP" == "Y" ]; then
+   		if [ "$FASTCGI" == "1" ]; then
+   			debug "Downloading php.fcgi to handle PHP through CGI"
+   			Download https://raw2.github.com/akash-mitra/fleeting-bunny/master/templates/php-fastcgi php.fcgi
+   			cp ${INSTALL_FOLDER}/php.fcgi /opt/skel/cgi-bin/
+   			chmod 755 /opt/skel/cgi-bin/php.fcgi
+   			debug "php.fcgi placed in user skeleton directory"
+   		fi 
+   fi   
+   WEB_ROOT="${HTTPROOT}/${SITENAME}/html"
+   
+   # add a new user and group for the website
+   useradd -b $HTTPROOT -d ${HTTPROOT}/${SITENAME} -m -k /opt/skel -s /bin/false ${SITEUSER}
+   If_Error_Exit "Unable to add user [${SITEUSER}]"
+   info "Added new user [${SITEUSER}] for website [${SITENAME}]"
+   
+   debug "Setting permission to user directories"
+   chmod 755 ${HTTPROOT}/${SITENAME}
+   chmod 755 ${HTTPROOT}/${SITENAME}/cgi-bin/php.fcgi
+   ln -s ${HTTPROOT}/${SITENAME}/logs /var/log/httpd/
+   
+   debug "Setting password for the new user"
+   APACHE_USER_PASS=`openssl rand -base64 12`
+   echo $APACHE_USER_PASS | passwd --stdin ${SITEUSER}
+   If_Error_Exit "Failed to set password for user [${SITEUSER}]"
+   chown root:root ${HTTPROOT}/${SITENAME}
+   
+   gather "New user [${SITEUSER}] added with password [${APACHE_USER_PASS}]"
 
+   
+   # Apache Configuration
+   # ---------------------------------------------------------------------------------------
+   # Now that Apache web server is installed and running, and directory structures
+   # are created, we will start configuring the server. This includes setting up 
+   # ports, host details (that is the website details), and some security and performance
+   # configurations.
+   
+   info "Starting Apache Configuration.."
+   
+   # The apache configuration is stored typically in httpd.conf file. The location of
+   # this configuration file can be varied depending on the system. In the following
+   # section, we will try to determine this location. One way to determine this location
+   # is to qyery the apache binary itself. Apache binary (httpd) when queries with -V 
+   # switch, shows many information and server configuration file location is one of them.
+   # (For more please refer to httpd man pages)
+   # To do this, however, we will need to first determine the apache binary location
+   
+   debug "Determine httpd binary location.."
+   APACHE_LOC=$(whereis -b httpd | cut -d' ' -f2)
+   debug "httpd located at $APACHE_LOC"
+   debug "Querying apache bin to determine Apache root location"
+   APACHE_ROOT_LOC=$($APACHE_LOC -V | grep HTTPD_ROOT | cut -d'"' -f2)
+   debug "Querying apache bin to determine Apache conf file location"
+   APACHE_CONFIG_LOC=$($APACHE_LOC -V | grep SERVER_CONFIG_FILE | cut -d'"' -f2)
+   APACHE_CONFIG_LOC="${APACHE_ROOT_LOC}/${APACHE_CONFIG_LOC}"
+   info "Apache Config file is determined to be located at $APACHE_CONFIG_LOC"
+   
+   # Now, before we start making any modification to the apache config file,
+   # it is good idea to take a backup of this file. If anything goes wrong, we can rollback
+   
+   debug "Backing up config file"
+   cp $APACHE_CONFIG_LOC $INSTALL_FOLDER
+   If_Error_Exit "Failed to backup Apache Config. Exiting" 
+   
+   # Modifying main apache config file
+   # ------------------------------------------------------------------------------
+   # From this point on, we start making the actual modifications in apache config.
+   # Apache config is largely divided in 3 sections. 
+   # - The 1st section deals with Apache server process as a whole.
+   # - The 2nd section define the parameters of the 'main' or 'default' server
+   # - The 3rd section contains all the settings for virtual hosts
+   # (For details, please read 
+   # http://www.techrepublic.com/article/learn-how-to-configure-apache/ )
+   # 
+   # The apache config file is mainly written as key-value pairs. The key is called 
+   # directive and the value of the key is specified after one (or more) blank space.
+   # For example, in the following line, "Listen" is a directive and "8080" is the value
+   # Listen 8080  
+   #
+   # The technique that we are using below to modify / change directive values is 
+   # a line-editor in-place replacement. We are using 'sed' as a line editing tool.
+   # sed -i 's/find/replace/' configfile
+   # A command like above will read the file "configfile" and replace the string "find"
+   # with the string "replace"
+   #
+   
+   # Configuring Apache Server Port
+   # -------------------------------------------------------------------------------
+   # This is the port where apache server will be listening for incoming connections
+   # As always, we first search in Fleeting Bunny config, if not available, we default
+   
+   APACHE_PORT=$(grep APACHE_PORT $FLEET_BUNN_CONFIG | cut -d'=' -f2)
+   SECURE_APACHE_PORT=443  # TODO
+   if [ "$APACHE_PORT" == "" ]; then
+   	debug "Apache Port value missing in config file. Defaulting to 80"
+   	APACHE_PORT="80"
+   fi
+   info "Setting Listener port to $APACHE_PORT"
+   sed -i "s/^Listen .*/Listen $APACHE_PORT/" $APACHE_CONFIG_LOC
+   If_Error_Exit "Failed to modify PORT in Apache Config. Exiting"
+   
+   
+   # Setting up server as Virtual Host
+   # -------------------------------------------------------------------------------
+   # We are setting the server as virtual host as in the future we might want to host
+   # multiple websites from the same server
+   
+   # Virtual Host setting is generally available in the 3rd section of Apache Config
+   # However, we will prefer not to touch this main apache config for this purpose.
+   # Instead we will add a separate config file for virtual host configuration only
+   
+   info "Setting up virtual host"
+   
+   echo "NameVirtualHost *:${APACHE_PORT}"    > ${APACHE_ROOT_LOC}/conf.d/00-EnableVirtualHost.conf
+   echo "Include conf.d/hosts/*"             >> ${APACHE_ROOT_LOC}/conf.d/00-EnableVirtualHost.conf
+   
+   
+   debug "Downloading the virtual host configuration template..."
+   Download https://raw.github.com/akash-mitra/fleeting-bunny/master/templates/apache-vhost virtual_template.sh
+   if [ $? -ne 0 ]; then
+   	debug "Failed to download virtual host template. Using default configuration"
+   	
+   	echo "# Following lines are added by Fleeting Bunny" > ${INSTALL_FOLDER}virtual_template.sh
+   	echo "# This is a static configuration!"            >> ${INSTALL_FOLDER}virtual_template.sh
+   	echo "<VirtualHost *:${APACHE_PORT}>"               >> ${INSTALL_FOLDER}virtual_template.sh
+       echo "ServerAdmin   __SERVER_ADMIN__"            >> ${INSTALL_FOLDER}virtual_template.sh
+       echo "DocumentRoot  __DOCUMENT_ROOT__"           >> ${INSTALL_FOLDER}virtual_template.sh
+       echo "ServerName    __SERVER_NAME__"             >> ${INSTALL_FOLDER}virtual_template.sh
+       echo "ServerAlias *.__SERVER_NAME__"             >> ${INSTALL_FOLDER}virtual_template.sh
+       echo "ErrorLog      __ERROR_LOG__"               >> ${INSTALL_FOLDER}virtual_template.sh
+       echo "CustomLog     __CUSTOM_LOG__ combined"     >> ${INSTALL_FOLDER}virtual_template.sh
+   	echo "</VirtualHost>"                               >> ${INSTALL_FOLDER}virtual_template.sh
+   fi
+   
+   # Following are some mandatory configuration that we must do in order to setup
+   # virtual hosting environment under Apache. If we are unable to setup any of these
+   # values, we exit. At the end of setting up these values in template, we push the
+   # template to actual config file.
+   
+   debug "Setting up mandatory configuration values in template"
+   sed -i "s/__APACHE_PORT__/${APACHE_PORT}/"                         ${INSTALL_FOLDER}virtual_template.sh
+   If_Error_Exit "Failed to setup virtual server port. Exiting"
+   
+   sed -i "s/__SERVER_ADMIN__/webmaster@${SITENAME}/"                 ${INSTALL_FOLDER}virtual_template.sh
+   If_Error_Exit "Failed to setup server admin. Exiting"
+   
+   sed -i "s~__DOCUMENT_ROOT__~${WEB_ROOT}~"                          ${INSTALL_FOLDER}virtual_template.sh
+   If_Error_Exit "Failed to setup document root. Exiting"
+   
+   sed -i "s/__SERVER_NAME__/${SITENAME}/g"                           ${INSTALL_FOLDER}virtual_template.sh
+   If_Error_Exit "Failed to setup server name. Exiting"
+   
+   sed -i "s~__ERROR_LOG__~${HTTPROOT}/${SITENAME}/logs/error.log~"   ${INSTALL_FOLDER}virtual_template.sh
+   If_Error_Exit "Failed to setup error log. Exiting" 
+   
+   sed -i "s~__CUSTOM_LOG__~${HTTPROOT}/${SITENAME}/logs/access.log~" ${INSTALL_FOLDER}virtual_template.sh
+   If_Error_Exit "Failed to setup access log. Exiting" 
+   
+   debug "adding the configured virtual host to apache config"
+   cp ${INSTALL_FOLDER}virtual_template.sh ${APACHE_ROOT_LOC}/conf.d/hosts/${SITENAME}.vhost || critical "Can not setup vhost file under conf.d/hosts"
+   
+   
+   # At this point, we have successfully setup all the necessary values for virtual 
+   # server. We will restart apache to check if everything is alright.
+   # In case of failure, we will rollback the changes
+   
+   debug "stopping all apache processes"
+   apachectl -k stop
+   debug "starting apache again..."
+   service httpd restart
+   if [ $? -ne 0 ]; then
+       error "Apache failed to restart. Attempting to re-instate server config"
+       cp $APACHE_CONFIG_LOC ${INSTALL_FOLDER}httpd.conf.debug
+       cp ${INSTALL_FOLDER}httpd.conf $APACHE_CONFIG_LOC
+       info "A copy of current apache conf is stored in $INSTALL_FOLDER for debug purpose"
+   	info "Attempting restart again"
+   	/etc/init.d/httpd start
+   	exit -1
+   else
+   	info "Apache server restarted successfully with virtual hosting environment"
+   	cp $APACHE_CONFIG_LOC ${INSTALL_FOLDER}httpd.conf.custom
+   	
+   	log "Adding entry in chkconfig so that apache run automatically when the server boots"
+   	/sbin/chkconfig httpd on
+   fi
+   
+   # Now that Apache is restarted, we will put a small file in the 
+   # server root so that we can test the webserver by pointing browser here
+   
+   echo "<html><head><title>Fleeting Bunny - Apache with virtual host</title></head><body>" > ${WEB_ROOT}/index.html
+   echo "<h1>Fleeting Bunny</h1><hr />Hostname: `hostname`</body></html>"                  >> ${WEB_ROOT}/index.html
+   
+   # Apache Fine Tuning
+   # In the following section, we will perform a few fine tuning of Apache 
+   # web server that may be useful for performance or security reasons.
+   # Whether or not to perform this step, can be controlled by setting
+   # FINE_TUNE_APACHE directive to 0 in FLEET BUNNY config file
+   
+   FINE_TUNE_APACHE=$(grep FINE_TUNE_APACHE $FLEET_BUNN_CONFIG | cut -d'=' -f2)
+   if [ "$FINE_TUNE_APACHE" != "0" ]; then
+   	info "Fine Tuning Apache Web server..."
+   	
+   	# Hide Apache Server Signature
+   	debug "Switching off Server Signature"
+   	sed -i 's/^ServerSignature .*/ServerSignature Off/' $APACHE_CONFIG_LOC
+   	if [ $? -ne 0 ]; then
+   		warning "Failed to change Apache directive: ServerSignature"
+   	fi
+   	
+   	# Change ServerToken 
+   	debug "Switching off Server Token"
+   	sed -i 's/^ServerTokens .*/ServerTokens ProductOnly/' $APACHE_CONFIG_LOC
+   	if [ $? -ne 0 ]; then
+   		warning "Failed to change Apache directive: ServerToken"
+   	fi
+   	
+   	# TODO: server pool size regulation optimization 
+   fi
+   
+   info "Apache optimization done. Restarting"
+   apachectl -k stop
+   service httpd start
+   if [ $? -ne 0 ]; then
+   	warning "Could not restart Apache after optimization. Rolling back to previous state"
+   	cp $APACHE_CONFIG_LOC ${INSTALL_FOLDER}httpd.conf.debug
+   	cp ${INSTALL_FOLDER}httpd.conf.custom $APACHE_CONFIG_LOC
+   	info "Rollback complete"
+   	debug "A copy of current apache conf is stored in $INSTALL_FOLDER for debug purpose"
+   	debug "Attempting restart again"
+   	service httpd start
+   	
+   	IF_Error_Exit "Recurrent error. Exiting"
+   
+   fi
+   info "Apache restarted successfully"
+   APACHE_INSTALLED=1
+   gather "All the files for the site [${SITENAME}] are to be stored under [${WEB_ROOT}]"
 
-# In this step, we will try to determine our primary website name from
-# fleeting bunny configuration file. In case, we fail to determine this
-# we will prompt the user for input
-
-debug "Trying to determine primary website name"
-SITENAME=$(getConfigValue "SITENAME")
-if [ "$SITENAME" == "" ]; then
-	warning "Primary site name not found in fleeting bunny config. Prompting for input"
-	echo "In the following step we configure Apache Webserver as a virtual host"
-	echo "Please specify your primary website name (e.g. example.com):"
-	read SITENAME
 fi
-info "Primary site name determined as $SITENAME"
-
-# In this step, we will create the directory structure required to store our websites
-# we will also grant necessary permissions to apache user
-# If any given website found to be existing, we will prompt user for overwrite
-
-info "Creating document root"
-if [ -d "/var/www/$SITENAME" ]; then
-	warning "web directory [/var/www/${SITENAME}] already exists"
-	SILENT_OVERWRITE=$(getConfigValue "SILENT_OVERWRITE")
-	if [ "$SILENT_OVERWRITE" -eq "1" ] || [ "$SILENT_OVERWRITE" == "y" ] || [ "$SILENT_OVERWRITE" == "Y" ] || [ "$SILENT_OVERWRITE" == "yes" ]; then
-		ANSWER="y"
-	else
-		echo "The directory already exists. Overwrite it? (y/n)"
-		read ANSWER;
-	fi
-	if [ "$ANSWER" == "y" ]; then
-		info "Specified directory exists, removing the same"
-		rm -rf /var/www/$SITENAME
-	else 
-		critical "Exiting the process as the directory already exists"
-		exit -1
-	fi
-fi
-WEB_ROOT="/var/www/$SITENAME/public_html"
-mkdir -p $WEB_ROOT
-If_Error_Exit "Could not create directory $WEB_ROOT" 
-
-log "Creating other directories for logging, backup etc."
-mkdir -p /var/www/$SITENAME/log
-mkdir -p /var/www/$SITENAME/backup
-
-log "Granting ownership of web directories to www user"
-chown -R apache:apache $WEB_ROOT
-If_Error_Exit "chown failed to change permission" 
-
-log "Granting ownership of log directories to www user"
-chown -R apache:apache /var/www/$SITENAME/log
-
-log "Granting world-read permission to web directory"
-chmod 755 $WEB_ROOT
-
-log "Revoking world read permission from log and backup directory"
-chmod 750 /var/www/$SITENAME/log
-chmod 700 /var/www/$SITENAME/backup
-
-# Apache Configuration
-# ---------------------------------------------------------------------------------------
-# Now that Apache web server is installed and running, and directory structures
-# are created, we will start configuring the server. This includes setting up 
-# ports, host details (that is the website details), and some security and performance
-# configurations.
-
-info "Starting Apache Configuration.."
-
-# The apache configuration is stored typically in httpd.conf file. The location of
-# this configuration file can be varied depending on the system. In the following
-# section, we will try to determine this location. One way to determine this location
-# is to qyery the apache binary itself. Apache binary (httpd) when queries with -V 
-# switch, shows many information and server configuration file location is one of them.
-# (For more please refer to httpd man pages)
-# To do this, however, we will need to first determine the apache binary location
-
-debug "Determine httpd binary location.."
-APACHE_LOC=$(whereis -b httpd | cut -d' ' -f2)
-debug "httpd located at $APACHE_LOC"
-debug "Querying apache bin to determine Apache root location"
-APACHE_ROOT_LOC=$($APACHE_LOC -V | grep HTTPD_ROOT | cut -d'"' -f2)
-debug "Querying apache bin to determine Apache conf file location"
-APACHE_CONFIG_LOC=$($APACHE_LOC -V | grep SERVER_CONFIG_FILE | cut -d'"' -f2)
-APACHE_CONFIG_LOC="${APACHE_ROOT_LOC}/${APACHE_CONFIG_LOC}"
-info "Apache Config file is determined to be located at $APACHE_CONFIG_LOC"
-
-# Now, before we start making any modification to the apache config file,
-# it is good idea to take a backup of this file. If anything goes wrong, we can rollback
-
-debug "Backing up config file"
-cp $APACHE_CONFIG_LOC $INSTALL_FOLDER
-If_Error_Exit "Failed to backup Apache Config. Exiting" 
-
-
-# From this point on, we start making the actual modifications in apache config.
-# Apache config is largely divided in 3 sections. 
-# - The 1st section deals with Apache server process as a whole.
-# - The 2nd section define the parameters of the 'main' or 'default' server
-# - The 3rd section contains all the settings for virtual hosts
-# (For details, please read 
-# http://www.techrepublic.com/article/learn-how-to-configure-apache/ )
-# 
-# The apache config file is mainly written as key-value pairs. The key is called 
-# directive and the value of the key is specified after one (or more) blank space.
-# For example, in the following line, "Listen" is a directive and "8080" is the value
-# Listen 8080  
-#
-# The technique that we are using below to modify / change directive values is 
-# a line-editor in-place replacement. We are using 'sed' as a line editing tool.
-# sed -i 's/find/replace/' configfile
-# A command like above will read the file "configfile" and replace the string "find"
-# with the string "replace"
-#
-
-# Configuring Apache Server Port
-# This is the port where apache server will be listening for incoming connections
-# As always, we first search in Fleeting Bunny config, if not available, we prompt user
-
-APACHE_PORT=$(grep APACHE_PORT $FLEET_BUNN_CONFIG | cut -d'=' -f2)
-SECURE_APACHE_PORT=443  # TODO
-if [ "$APACHE_PORT" == "" ]; then
-	debug "Apache Port value missing in config file. Prompting for user input"
-	echo "By Default webservers execute at port 80. You may want to change this"
-	echo "Please enter new port number. Just enter to retain default value"
-	read APACHE_PORT
-	if [ "$APACHE_PORT" == "" ]; then
-		APACHE_PORT="80"
-	fi
-fi
-info "Setting Listener port to $APACHE_PORT"
-sed -i "s/^Listen .*/Listen $APACHE_PORT/" $APACHE_CONFIG_LOC
-If_Error_Exit "Failed to modify PORT in Apache Config. Exiting"
-
-
-# setting up server as Virtual Host
-# Virtual Host setting is generally available in the 3rd section of Apache Config
-# We are setting the server as virtual host as in the future we might want to host
-# multiple websites from the same server
-
-info "Setting up virtual host"
-sed -i "s/^#NameVirtualHost .*/NameVirtualHost *:${APACHE_PORT}/" $APACHE_CONFIG_LOC
-If_Error_Exit "Failed to uncomment NameVirtualHost in Apache Config. Exiting"
-
-
-debug "Downloading the virtual host configuration template..."
-Download https://raw.github.com/akash-mitra/fleeting-bunny/master/templates/apache-vhost virtual_template.sh
-if [ $? -ne 0 ]; then
-	debug "Failed to download virtual host template. Using default configuration"
-	
-	echo "# Following lines are added by Fleeting Bunny" > ${INSTALL_FOLDER}virtual_template.sh
-	echo "# This is a static configuration!" >> ${INSTALL_FOLDER}virtual_template.sh
-	echo "<VirtualHost *:${APACHE_PORT}>" >> ${INSTALL_FOLDER}virtual_template.sh
-    echo "ServerAdmin __SERVER_ADMIN__" >> ${INSTALL_FOLDER}virtual_template.sh
-    echo "DocumentRoot __DOCUMENT_ROOT__" >> ${INSTALL_FOLDER}virtual_template.sh
-    echo "ServerName __SERVER_NAME__" >> ${INSTALL_FOLDER}virtual_template.sh
-    echo "ErrorLog __ERROR_LOG__" >> ${INSTALL_FOLDER}virtual_template.sh
-    echo "CustomLog __CUSTOM_LOG__ combined" >> ${INSTALL_FOLDER}virtual_template.sh
-	echo "</VirtualHost>" >> ${INSTALL_FOLDER}virtual_template.sh
-fi
-
-# Following are some mandatory configuration that we must do in order to setup
-# virtual hosting environment under Apache. If we are unable to setup any of these
-# values, we exit. At the end of setting up these values in template, we push the
-# template to actual config file.
-
-debug "Setting up mandatory configuration values in template"
-sed -i "s/__APACHE_PORT__/${APACHE_PORT}/" ${INSTALL_FOLDER}virtual_template.sh
-If_Error_Exit "Failed to setup virtual server port. Exiting"
-
-sed -i "s/__SERVER_ADMIN__/webmaster@${SITENAME}/" ${INSTALL_FOLDER}virtual_template.sh
-If_Error_Exit "Failed to setup server admin. Exiting"
-
-sed -i "s~__DOCUMENT_ROOT__~/var/www/$SITENAME/public_html~" ${INSTALL_FOLDER}virtual_template.sh
-If_Error_Exit "Failed to setup document root. Exiting"
-
-sed -i "s/__SERVER_NAME__/www.$SITENAME/" ${INSTALL_FOLDER}virtual_template.sh
-If_Error_Exit "Failed to setup server name. Exiting"
-
-sed -i "s~__ERROR_LOG__~/var/www/$SITENAME/log/error~" ${INSTALL_FOLDER}virtual_template.sh
-If_Error_Exit "Failed to setup error log. Exiting" 
-
-sed -i "s~__CUSTOM_LOG__~/var/www/$SITENAME/log/access~" ${INSTALL_FOLDER}virtual_template.sh
-If_Error_Exit "Failed to setup access log. Exiting" 
-
-debug "adding the configured virtual host to apache config"
-cat ${INSTALL_FOLDER}virtual_template.sh >> $APACHE_CONFIG_LOC
-
-
-# At this point, we have successfully setup all the necessary values for virtual 
-# server. We will restart apache to check if everything is alright.
-# In case of failure, we will rollback the changes
-
-debug "stopping all apache processes"
-apachectl -k stop
-debug "starting apache again..."
-/etc/init.d/httpd start
-if [ $? -ne 0 ]; then
-    error "Apache failed to restart. Attempting to re-instate server config"
-    cp $APACHE_CONFIG_LOC ${INSTALL_FOLDER}httpd.conf.debug
-    cp ${INSTALL_FOLDER}httpd.conf $APACHE_CONFIG_LOC
-    info "A copy of current apache conf is stored in $INSTALL_FOLDER for debug purpose"
-	info "Attempting restart again"
-	/etc/init.d/httpd start
-	exit -1
-else
-	info "Apache server restarted successfully with virtual hosting environment"
-	cp $APACHE_CONFIG_LOC ${INSTALL_FOLDER}httpd.conf.custom
-	
-	log "Adding entry in chkconfig so that apache run automatically when the server boots"
-	/sbin/chkconfig httpd on
-fi
-
-# Now that Apache is restarted, we will put a small file in the 
-# server root so that we can test the webserver by pointing browser here
-
-echo "<html><head><title>Fleeting Bunny - Apache with virtual host</title></head><body>" > ${WEB_ROOT}/index.html
-echo "<h1>Fleeting Bunny</h1><hr />Hostname: `hostname`</body></html>" >> ${WEB_ROOT}/index.html
-
-# Apache Fine Tuning
-# In the following section, we will perform a few fine tuning of Apache 
-# web server that may be useful for performance or security reasons.
-# Whether or not to perform this step, can be controlled by setting
-# FINE_TUNE_APACHE directive to 0 in FLEET BUNN config file
-
-FINE_TUNE_APACHE=$(grep FINE_TUNE_APACHE $FLEET_BUNN_CONFIG | cut -d'=' -f2)
-if [ "$FINE_TUNE_APACHE" != "0" ]; then
-	info "Fine Tuning Apache Web server..."
-	
-	# Hide Apache Server Signature
-	debug "Switching off Server Signature"
-	sed -i 's/^ServerSignature .*/ServerSignature Off/' $APACHE_CONFIG_LOC
-	if [ $? -ne 0 ]; then
-		warning "Failed to change Apache directive: ServerSignature"
-	fi
-	
-	# Change ServerToken 
-	debug "Switching off Server Token"
-	sed -i 's/^ServerTokens .*/ServerTokens ProductOnly/' $APACHE_CONFIG_LOC
-	if [ $? -ne 0 ]; then
-		warning "Failed to change Apache directive: ServerToken"
-	fi
-	
-	# TODO: server pool size regulation optimization 
-fi
-
-info "Apache optimization done. Restarting"
-apachectl -k stop
-/etc/init.d/httpd start
-if [ $? -ne 0 ]; then
-	warning "Could not restart Apache after optimization. Rolling back to previous state"
-	cp $APACHE_CONFIG_LOC ${INSTALL_FOLDER}httpd.conf.debug
-	cp ${INSTALL_FOLDER}httpd.conf.custom $APACHE_CONFIG_LOC
-	info "Rollback complete"
-	debug "A copy of current apache conf is stored in $INSTALL_FOLDER for debug purpose"
-	debug "Attempting restart again"
-	/etc/init.d/httpd start
-	
-	IF_Error_Exit "Recurrent error. Exiting"
-
-fi
-info "Apache restarted successfully"
-APACHE_INSTALLED=1
-gather "All the files for the site [${SITENAME}] are to be stored under [${WEB_ROOT}]"
 
 #--------------------------------------------------------
 #        INSTALL PHP
 #--------------------------------------------------------
 
 debug "Checking directive for PHP installation"
-INSTALL_PHP=$(grep INSTALL_PHP $FLEET_BUNN_CONFIG | cut -d'=' -f2)
-if [ "$INSTALL_PHP" == "" ]; then
-	info "No explicit directive about PHP installation in config file. Will prompt"
-	echo "Do you want to install PHP? (y / N)"
-	read INSTALL_PHP
-fi
 if [ "$INSTALL_PHP" == "1" ] || [ "$INSTALL_PHP" == "y" ] || [ "$INSTALL_PHP" == "Y" ]; then
 	debug "starting PHP installation"
-	yum -y install php php-mysql > /dev/null
-	If_Error_Exit "Failed to install PHP or PHP-MYSQL"
-
+	Install_If_Missing "php"
 	info "`php --version | head -1` installed successfully" 
 	PHP_INSTALLED=1
+	
+	# If php is installed, by default we will configure the server to run 
+	# PHP through CGI instead of mod_php etc. 
+	if [ "$FASTCGI" == "1" ]; then
+		
+		info "Enabling Common Gateway Interface (CGI) for PHP"
+		
+		# install Extended package manager
+		debug "Installing EPEL"
+		rpm -Uvh http://mirror.pnl.gov/epel/6/i386/epel-release-6-8.noarch.rpm || warning "Failed to add extended package manager"
+		
+		# Install prereqs
+		debug "Installing pre-requisite for compiling fast-cgi"
+		Install_If_Missing "httpd-devel"
+		Install_If_Missing "gcc"
+		
+		# FastCGI
+		debug "Downloading Fast CGI"
+		Download http://www.fastcgi.com/dist/mod_fastcgi-current.tar.gz mod_fastcgi-current.tar.gz
+		
+		# Make and Install Fast CGI
+		debug "Making and Installing FastCGI"
+		tar -zxvf ${INSTALL_FOLDER}/mod_fastcgi-current.tar.gz
+		cd ${INSTALL_FOLDER}/mod_fastcgi*
+		cp Makefile.AP2 Makefile
+		make top_dir=/usr/lib64/httpd          > /dev/null
+		make install top_dir=/usr/lib64/httpd  > /dev/null
+		
+		# create a HTTP configuration file for FastCGI
+		debug "Creating a HTTP configuration file for FastCGI: ${APACHE_ROOT_LOC}/conf.d/01-FastCGI.conf"
+		echo "LoadModule fastcgi_module modules/mod_fastcgi.so"                                                  > ${APACHE_ROOT_LOC}/conf.d/01-FastCGI.conf
+		echo "DirectoryIndex index.php default.php"                                                             >> ${APACHE_ROOT_LOC}/conf.d/01-FastCGI.conf
+		echo ""                                                                                                 >> ${APACHE_ROOT_LOC}/conf.d/01-FastCGI.conf
+		echo "  AddHandler fastcgi-script .fcgi"                                                                >> ${APACHE_ROOT_LOC}/conf.d/01-FastCGI.conf
+		echo "  FastCgiWrapper /usr/sbin/suexec"                                                                >> ${APACHE_ROOT_LOC}/conf.d/01-FastCGI.conf
+		echo "  FastCgiIpcDir fcgi/"                                                                            >> ${APACHE_ROOT_LOC}/conf.d/01-FastCGI.conf
+		echo "  FastCgiConfig -singleThreshold 1 -autoUpdate -idle-timeout 240 -pass-header HTTP_AUTHORIZATION" >> ${APACHE_ROOT_LOC}/conf.d/01-FastCGI.conf
+		
+		# disable the mod_php config file 
+		debug "Disabling the configuration file for mod_php"
+		cp ${APACHE_ROOT_LOC}/conf.d/php.conf ${APACHE_ROOT_LOC}/conf.d/php.con.bak
+		echo "#Disabled. Original content of this file is saved as php.con.bak" > ${APACHE_ROOT_LOC}/conf.d/php.conf
+		
+		# set s bit in suexec
+		debug "Configuring suexec"
+		chmod 755 /usr/sbin/suexec
+		chmod +s /usr/sbin/suexec
+		
+		# RAM RAM
+		
+	fi
 
 	
 	# TODO: PHP Hardening:
@@ -701,11 +794,6 @@ fi
 
 debug "Checking directive for MySQL database installation"
 INSTALL_MYSQL=$(grep INSTALL_MYSQL $FLEET_BUNN_CONFIG | cut -d'=' -f2)
-if [ "$INSTALL_MYSQL" == "" ]; then
-	debug "No explicit directive about MySQL installation in config file. Will prompt"
-	echo "Do you want to install MySQL database? (y / N)"
-	read INSTALL_MYSQL
-fi
 if [ "$INSTALL_MYSQL" == "1" ] || [ "$INSTALL_MYSQL" == "y" ] || [ "$INSTALL_MYSQL" == "Y" ]; then
 	debug "Starting MySQL database installation"
 	
@@ -724,7 +812,9 @@ if [ "$INSTALL_MYSQL" == "1" ] || [ "$INSTALL_MYSQL" == "y" ] || [ "$INSTALL_MYS
 	else # local installation
 		info "The database will be installed in the local machine"
 		
-		Install_If_Missing "mysql-server"		
+		Install_If_Missing "mysql-server"	
+		[ "$PHP_INSTALLED" == "1" ] && Install_If_Missing "php-mysql"
+		
 		info "`mysql -h localhost -V` installed successfully" 
 		
 		debug "Attempting to start MySQL"
@@ -985,4 +1075,3 @@ echo "-A INPUT -j DROP" >> ${FIREWALL_RULE_FILE}
 # now apply these rules 
 echo "COMMIT" >> ${FIREWALL_RULE_FILE}
 $IPTR < ${FIREWALL_RULE_FILE}
-
