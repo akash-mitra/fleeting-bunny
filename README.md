@@ -1,6 +1,12 @@
 fleeting-bunny
 ==============
 
+<p align="center">
+<b>This tool is no longer maintained, please use Fairy ("https://github.com/akash-mitra/fairy") instead.
+<br>
+Fairy is an automated Nginx, PHP FPM Web Server Installer for Cloud Services such as DigitalOcean.</b>
+</p>
+
 Fleeting-bunny is a bash script that configures and secures DigitalOcean droplets as web server. Currently it works on  Fedora based Linux only (CentOS, Redhat etc.). 
 
 Fleeting-bunny can be executed in interactive mode or in unattended setup mode and can be heavily customized using local or remotely hosted configuration file.
